@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "price-monitor"
+version = "0.1.0"
+description = "Bot local de monitoramento de preços com Telegram e SQLite"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "APScheduler>=3.10,<4",
+    "beautifulsoup4>=4.12,<5",
+    "httpx>=0.27,<1",
+    "python-dotenv>=1.0,<2",
+    "python-telegram-bot>=21,<23",
+]
+
+[project.optional-dependencies]
+dev = [
+    "bandit>=1.7,<2",
+    "pip-audit>=2.7,<3",
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.23,<2",
+    "ruff>=0.6,<1",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S101"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
