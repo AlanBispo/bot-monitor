@@ -14,6 +14,10 @@ from ..pricing import InvalidMoney, parse_money
 from .base import StoreParseError
 
 
+class StructuredDataMissing(StoreParseError):
+    """Only absence of Product data allows an independently validated HTML fallback."""
+
+
 def _schema_type(value: object) -> str:
     if not isinstance(value, str):
         return ""
@@ -59,6 +63,8 @@ def _first_price(offers) -> tuple[str | None, str | None]:
         price = offer.get("price")
         if price is None and offer.get("lowPrice") == offer.get("highPrice"):
             price = offer.get("lowPrice")
+        if price is None:
+            return None, None
         if price is not None:
             currency = offer.get("priceCurrency") or offer.get("currency")
             found.append((str(price), currency if isinstance(currency, str) else None))
@@ -78,7 +84,7 @@ def parse_jsonld_offer(html: str, url: str, store: str) -> StoreOffer:
         try:
             payload = json.loads(script.string or script.get_text())
         except (TypeError, json.JSONDecodeError):
-            continue
+            raise StoreParseError("JSON-LD malformado") from None
         for node in _jsonld_nodes(payload):
             kind = node.get("@type")
             kinds = kind if isinstance(kind, list) else [kind]
@@ -86,7 +92,7 @@ def parse_jsonld_offer(html: str, url: str, store: str) -> StoreOffer:
                 if node not in products:
                     products.append(node)
     if not products:
-        raise StoreParseError("dados estruturados de produto ausentes")
+        raise StructuredDataMissing("dados estruturados de produto ausentes")
     if len(products) != 1:
         raise StoreParseError("múltiplos produtos estruturados ambíguos")
     product = products[0]
@@ -102,6 +108,13 @@ def parse_jsonld_offer(html: str, url: str, store: str) -> StoreOffer:
         for item in values
     ):
         raise StoreParseError("tipo de oferta estruturada inválido")
+    attributes = _attributes(product)
+    conditions = {_condition(item.get("itemCondition")) for item in [product, *values]
+                  if item.get("itemCondition") is not None}
+    if len(conditions) > 1:
+        raise StoreParseError("condições estruturadas conflitantes")
+    if conditions:
+        attributes["condition"] = conditions.pop()
     statuses = {
         _availability(item.get("availability"))
         for item in values
@@ -109,10 +122,25 @@ def parse_jsonld_offer(html: str, url: str, store: str) -> StoreOffer:
     if statuses == {False}:
         return StoreOffer(
             store, name.strip(), url, None, None, seller=None, available=False,
-            observation_status="unavailable", attributes=_attributes(product),
+            observation_status="unavailable", attributes=attributes,
         )
     if statuses != {True}:
         raise StoreParseError("disponibilidade estruturada ambígua")
+    for item in [product, *values]:
+        if any(item.get(key) for key in (
+            "validForMemberTier", "eligibleTransactionVolume", "eligibleQuantity",
+            "eligibleCustomerType", "eligibleRegion", "ineligibleRegion",
+        )):
+            raise StoreParseError("preço condicionado a elegibilidade não comprovada")
+    for item in values:
+        specs = item.get("priceSpecification", [])
+        specs = specs if isinstance(specs, list) else [specs]
+        for spec in specs:
+            if not isinstance(spec, dict) or any(spec.get(key) for key in (
+                "validForMemberTier", "eligibleTransactionVolume", "eligibleQuantity",
+                "billingDuration", "billingIncrement", "referenceQuantity",
+            )):
+                raise StoreParseError("especificação de preço condicionada ou ambígua")
     raw_price, currency = _first_price(offer_data)
     if not raw_price:
         raise StoreParseError("preço estruturado ausente")
@@ -127,11 +155,20 @@ def parse_jsonld_offer(html: str, url: str, store: str) -> StoreOffer:
     shipping = None
     if len(values) == 1 and isinstance(values[0], dict):
         details = values[0].get("shippingDetails")
+        if isinstance(details, dict) and details.get("doesNotShip"):
+            raise StoreParseError("oferta sem entrega disponível")
         rate = details.get("shippingRate") if isinstance(details, dict) else None
         if (
             isinstance(details, dict)
             and not details.get("shippingDestination")
+            and not any(details.get(key) for key in (
+                "validForMemberTier", "shippingSettingsLink", "shippingLabel",
+                "eligibleTransactionVolume",
+            ))
             and isinstance(rate, dict)
+            and not any(rate.get(key) for key in (
+                "validForMemberTier", "eligibleTransactionVolume", "minValue", "maxValue",
+            ))
         ):
             shipping_currency = rate.get("currency") or rate.get("priceCurrency") or currency
             if (
@@ -144,12 +181,26 @@ def parse_jsonld_offer(html: str, url: str, store: str) -> StoreOffer:
                 except InvalidMoney:
                     shipping = None
     canonical = product.get("url") if isinstance(product.get("url"), str) else None
+    seller_data = values[0].get("seller") if len(values) == 1 else None
+    seller = seller_data.get("name") if isinstance(seller_data, dict) else seller_data
     return StoreOffer(
         store, name.strip(), url, price, shipping,
-        seller=None, available=True, observation_status="available",
-        attributes=_attributes(product),
+        seller=seller if isinstance(seller, str) else None,
+        available=True, observation_status="available",
+        attributes=attributes,
         canonical_url=urljoin(url, canonical) if canonical else None,
     )
+
+
+def _condition(value) -> str:
+    normalized = _schema_type(value)
+    conditions = {
+        "newcondition": "novo", "usedcondition": "usado",
+        "refurbishedcondition": "recondicionado", "damagedcondition": "danificado",
+    }
+    if normalized not in conditions:
+        raise StoreParseError("condição estruturada desconhecida")
+    return conditions[normalized]
 
 
 def _attributes(product: dict) -> dict[str, str]:

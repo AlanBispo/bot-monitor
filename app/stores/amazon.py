@@ -13,7 +13,7 @@ from ..models import StoreOffer, StoreSearchResult
 from ..network import PinnedAsyncHTTPTransport
 from ..pricing import InvalidMoney, parse_money
 from ..security import UnsafeURL, validate_url
-from .base import StoreAdapter, StoreError, StoreParseError
+from .base import StoreAdapter, StoreError, StoreParseError, validate_search_page
 from .http import request_limited
 
 LOGGER = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ def parse_search_results(
     results: list[StoreSearchResult] = []
     for item in soup.select('div[data-component-type="s-search-result"][data-asin]'):
         title = _first_text(item, ("h2 span", "h2"))
-        link = item.select_one("h2 a")
+        link = item.select_one("h2 a, a:has(h2)")
         if not title or not link or not link.get("href"):
             continue
         url = urljoin(base_url, link["href"])
@@ -97,7 +97,7 @@ def parse_search_results(
             continue
         price = _price(_first_text(item, (".a-price .a-offscreen",)))
         results.append(StoreSearchResult("amazon", title, url, price))
-    return results
+    return validate_search_page(html, results)
 
 
 def parse_offer(html: str, url: str) -> StoreOffer:

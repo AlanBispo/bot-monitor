@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 from collections.abc import Iterable
+from datetime import UTC, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
@@ -113,10 +114,11 @@ async def run() -> None:
     if discovery_endpoint:
         providers = [
             JsonWebDiscoveryProvider(
-            discovery_endpoint,
-            api_key=web_api_key or None,
-            max_response_bytes=max_response_bytes,
-            timeout_seconds=float(os.getenv("WEB_DISCOVERY_TIMEOUT_SECONDS", "10")),
+                discovery_endpoint,
+                api_key=web_api_key or None,
+                max_response_bytes=max_response_bytes,
+                timeout_seconds=float(os.getenv("WEB_DISCOVERY_TIMEOUT_SECONDS", "10")),
+                api_format=os.getenv("GENERIC_DISCOVERY_FORMAT", "json"),
             )
         ]
         # Store-native providers are added by the orchestrator when providers are omitted;
@@ -146,26 +148,32 @@ async def run() -> None:
         concurrency=int(os.getenv("DISCOVERY_CONCURRENCY", "4")),
         generic_adapter=adapters.get("generic"),
     )
-    monitor = Monitor(database, adapters, AlertEngine(database))
-    application = build_application(database, adapters, token, chat_id, monitor, discovery)
     interval = max(5, int(os.getenv("CHECK_INTERVAL_MINUTES", "30")))
+    fetch_timeout = float(os.getenv("FETCH_TOTAL_TIMEOUT_SECONDS", "30"))
+    if not 0 < fetch_timeout <= 300:
+        raise ValueError("FETCH_TOTAL_TIMEOUT_SECONDS deve estar entre 0 e 300")
+    monitor = Monitor(database, adapters, AlertEngine(database), 4, fetch_timeout)
+    application = build_application(database, adapters, token, chat_id, monitor, discovery)
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        monitor.check_once,
-        "interval",
-        minutes=interval,
-        args=[lambda message: application.bot.send_message(chat_id, message)],
-        id="price-check",
-        replace_existing=True,
-    )
-    scheduler.start()
-    logging.getLogger(__name__).info("Price Monitor iniciado; intervalo %s minutos", interval)
     try:
         async with application:
             await application.start()
             try:
                 await application.updater.start_polling(
                     allowed_updates=["message", "callback_query"]
+                )
+                scheduler.add_job(
+                    monitor.check_once,
+                    "interval",
+                    minutes=interval,
+                    args=[lambda message: application.bot.send_message(chat_id, message)],
+                    id="price-check",
+                    replace_existing=True,
+                    next_run_time=datetime.now(UTC),
+                )
+                scheduler.start()
+                logging.getLogger(__name__).info(
+                    "Price Monitor iniciado; verificação imediata e intervalo %s minutos", interval
                 )
                 await asyncio.Event().wait()
             finally:
@@ -174,7 +182,8 @@ async def run() -> None:
                 if application.running:
                     await application.stop()
     finally:
-        scheduler.shutdown(wait=False)
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
 
 
 if __name__ == "__main__":

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
-import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal
 
-from .models import StoreOffer
+from .identity import COLORS, CONDITIONS, explicit_attributes, normalize_text
+from .models import Product, StoreOffer
 from .query import SearchQuery
 
 
@@ -19,51 +20,6 @@ class MatchDecision:
     attributes: dict[str, str]
 
 
-def normalize_text(value: str) -> str:
-    folded = unicodedata.normalize("NFKD", value.casefold())
-    return "".join(char for char in folded if not unicodedata.combining(char))
-
-
-def _title_attributes(title: str) -> dict[str, str]:
-    text = normalize_text(title)
-    attrs: dict[str, str] = {}
-    model = re.search(
-        r"\b(?:modelo|model|ref|referencia|codigo)\s*[:#-]?\s*([a-z0-9][a-z0-9._/-]{0,40})\b",
-        text,
-    )
-    if model:
-        attrs["model"] = model.group(1)
-    capacity = re.search(r"\b(\d+(?:[.,]\d+)?)\s*(gb|tb|mb)\b", text)
-    if capacity:
-        attrs["capacity"] = f"{capacity.group(1).replace(',', '.')} {capacity.group(2)}"
-    volume = re.search(r"\b(\d+(?:[.,]\d+)?)\s*(ml|l|litros?)\b", text)
-    if volume:
-        attrs["volume"] = f"{volume.group(1).replace(',', '.')} {volume.group(2)}"
-    size = re.search(r"\b(\d+(?:[.,]\d+)?)\s*(cm|mm|m)\b", text)
-    if size:
-        attrs["size"] = f"{size.group(1).replace(',', '.')} {size.group(2)}"
-    clothing_size = re.search(r"\btamanho\s+(p|m|g|gg|xg|medio)\b", text)
-    if clothing_size:
-        attrs["size"] = clothing_size.group(1)
-    color = re.search(
-        r"\b(preto|preta|black|branco|branca|white|azul|blue|vermelho|vermelha|red|"
-        r"verde|green|amarelo|amarela|yellow|rosa|pink|cinza|gray|grey|prata|silver)\b",
-        text,
-    )
-    if color:
-        attrs["color"] = color.group(1)
-    quantity = re.search(r"\b(?:pack|kit|com)\s*(\d+)\b", text)
-    if quantity:
-        attrs["package_quantity"] = quantity.group(1)
-    for condition in ("novo", "nova", "usado", "usada", "seminovo", "seminova", "recondicionado"):
-        if re.search(rf"\b{condition}\b", text):
-            attrs["condition"] = {
-                "nova": "novo", "usada": "usado", "seminova": "seminovo"
-            }.get(condition, condition)
-            break
-    return attrs
-
-
 def _same(expected: str | int | None, actual: str | None) -> bool:
     if expected is None or actual is None:
         return True
@@ -73,8 +29,9 @@ def _same(expected: str | int | None, actual: str | None) -> bool:
         "tb": 1024, "gb": 1, "mb": Decimal("0.0009765625"),
         "l": 1000, "litro": 1000, "litros": 1000, "ml": 1,
         "m": 1000, "cm": 10, "mm": 1,
+        "kg": 1000, "g": 1,
     }
-    unit_pattern = r"(\d+(?:[.,]\d+)?)(tb|gb|mb|l|litro|litros|ml|cm|mm|m)"
+    unit_pattern = r"(\d+(?:[.,]\d+)?)(tb|gb|mb|l|litro|litros|ml|cm|mm|m|kg|g)"
     expected_unit = re.fullmatch(unit_pattern, expected_text)
     actual_unit = re.fullmatch(unit_pattern, actual_text)
     if expected_unit and actual_unit:
@@ -83,6 +40,8 @@ def _same(expected: str | int | None, actual: str | None) -> bool:
                 return "storage"
             if unit in {"l", "litro", "litros", "ml"}:
                 return "volume"
+            if unit in {"kg", "g"}:
+                return "weight"
             return "size"
 
         if category(expected_unit.group(2)) != category(actual_unit.group(2)):
@@ -93,27 +52,9 @@ def _same(expected: str | int | None, actual: str | None) -> bool:
             expected_value * units[expected_unit.group(2)]
             == actual_value * units[actual_unit.group(2)]
         )
-    conditions = {"nova": "novo", "usada": "usado", "seminova": "seminovo"}
-    colors = {
-        "preta": "preto", "black": "preto", "branca": "branco", "white": "branco",
-        "blue": "azul", "vermelha": "vermelho", "red": "vermelho",
-        "green": "verde", "amarela": "amarelo", "yellow": "amarelo",
-        "pink": "rosa", "gray": "cinza", "grey": "cinza", "silver": "prata",
-    }
-    expected_text = conditions.get(expected_text, expected_text)
-    actual_text = conditions.get(actual_text, actual_text)
-    expected_text = colors.get(expected_text, expected_text)
-    actual_text = colors.get(actual_text, actual_text)
+    expected_text = COLORS.get(expected_text, CONDITIONS.get(expected_text, expected_text))
+    actual_text = COLORS.get(actual_text, CONDITIONS.get(actual_text, actual_text))
     return expected_text == actual_text
-
-
-def _model_tokens(text: str) -> set[str]:
-    tokens = re.findall(r"\b[a-z][a-z0-9]*(?:[-/][a-z0-9]+)*\b", normalize_text(text))
-    return {
-        token for token in tokens
-        if any(char.isdigit() for char in token)
-        and not re.fullmatch(r"\d+(?:gb|tb|mb|ml|cm|mm)", token)
-    }
 
 
 def _lexical_tokens(text: str) -> set[str]:
@@ -127,15 +68,21 @@ def _lexical_tokens(text: str) -> set[str]:
     }
     return {
         token for token in re.findall(r"[a-z0-9]+", normalize_text(text))
-        if len(token) > 1 and token not in ignored and not token.isdigit()
+        if token not in ignored and not token.isdigit()
         and not re.fullmatch(r"\d+(?:gb|tb|mb|ml|l|cm|mm|m)", token)
     }
 
 
 def offer_identity_attributes(offer: StoreOffer) -> dict[str, str]:
-    attributes = dict(_title_attributes(offer.title))
+    attributes = explicit_attributes(offer.title)
     if offer.attributes:
-        attributes.update({key: normalize_text(value) for key, value in offer.attributes.items()})
+        for key, value in offer.attributes.items():
+            if key == "sku":
+                continue
+            normalized = normalize_text(value)
+            if key in attributes and not _same(attributes[key], normalized):
+                attributes[f"conflict_{key}"] = "true"
+            attributes[key] = normalized
     return attributes
 
 
@@ -149,16 +96,40 @@ def match_offer(query: SearchQuery, offer: StoreOffer) -> MatchDecision:
         "package_quantity": query.package_quantity,
         "condition": query.condition,
         "color": query.color,
+        "ram": query.ram,
+        "weight": query.weight,
+        "variant": query.variant,
+        "accessory": query.accessory,
+        "model_codes": query.model_codes,
     }
+    if any(key.startswith("conflict_") for key in attributes):
+        return MatchDecision("rejected", 0, "conflicting_identity_evidence", attributes)
+    if attributes.get("accessory") != query.accessory and attributes.get("accessory"):
+        return MatchDecision("rejected", 0, "hard_mismatch_item_kind", attributes)
+    # Compare each number with its label: iPhone 15 is independent of Tela 6.1.
+    actual_numbers = attributes.get("model_numbers", "").split()
+    for term in (query.model_numbers or "").split():
+        label, number = term.split(":", 1)
+        values = {item.split(":", 1)[1] for item in actual_numbers
+                  if item.startswith(f"{label}:")}
+        if values and values != {number}:
+            return MatchDecision("rejected", 0, "hard_mismatch_model", attributes)
+        if not values:
+            return MatchDecision("ambiguous", 0, "model_unknown", attributes)
     for key, wanted in expected.items():
         if wanted is not None and key in attributes and not _same(wanted, attributes[key]):
-            return MatchDecision("rejected", 0, f"hard_mismatch_{key}", attributes)
-    query_models = _model_tokens(query.normalized_text)
-    actual_models = _model_tokens(attributes.get("model", offer.title))
-    if query_models and actual_models and query_models.isdisjoint(actual_models):
-        return MatchDecision("rejected", 0, "hard_mismatch_model", attributes)
-    if query_models and not actual_models:
+            reason_key = "model" if key == "model_codes" else key
+            return MatchDecision("rejected", 0, f"hard_mismatch_{reason_key}", attributes)
+    if query.model_codes and not attributes.get("model_codes"):
         return MatchDecision("ambiguous", 0, "model_unknown", attributes)
+    if query.variant is None and attributes.get("variant"):
+        return MatchDecision("ambiguous", 0, "variant_unspecified", attributes)
+    if query.package_quantity is None and attributes.get("package_quantity"):
+        return MatchDecision("ambiguous", 0, "package_quantity_unspecified", attributes)
+    if query.condition is None and attributes.get("condition") in {
+        "usado", "seminovo", "recondicionado", "danificado",
+    }:
+        return MatchDecision("ambiguous", 0, "condition_unspecified", attributes)
     title_tokens = _lexical_tokens(offer.title)
     query_tokens = _lexical_tokens(query.normalized_text)
     score = len(title_tokens & query_tokens)
@@ -174,3 +145,36 @@ def match_offer(query: SearchQuery, offer: StoreOffer) -> MatchDecision:
     if score < max(1, min(2, len(query_tokens))):
         return MatchDecision("ambiguous", score, "low_lexical_score", attributes)
     return MatchDecision("matched", score, "matched_explicit_constraints", attributes)
+
+
+def match_product(product: Product, offer: StoreOffer) -> MatchDecision:
+    """Compare a confirmed identity, including evidence learned at registration."""
+    from .query import parse_query
+
+    saved = json.loads(product.identity_json) if product.identity_json else {}
+    original = match_offer(parse_query((product.source_query or product.name)[:200]), offer)
+    if original.status == "rejected":
+        return original
+    known = {key: value for key, value in saved.get("attributes", {}).items()
+             if key not in {"sku", "model_numbers"}}
+    if (saved.get("manual_confirmation") and not known and saved.get("confirmed_title")
+            and normalize_text(saved["confirmed_title"]) != normalize_text(offer.title)):
+        return MatchDecision("ambiguous", 0, "manual_identity_changed",
+                             offer_identity_attributes(offer))
+    current = offer_identity_attributes(offer)
+    for key, wanted in known.items():
+        if key.startswith("conflict_"):
+            return MatchDecision("rejected", 0, "saved_identity_conflict", current)
+        if key in {"brand", "model"} and key not in current and re.search(
+            rf"(?<!\w){re.escape(normalize_text(wanted))}(?!\w)", normalize_text(offer.title),
+        ):
+            current[key] = normalize_text(wanted)
+        if key not in current:
+            return MatchDecision("ambiguous", 0, f"saved_attribute_unknown_{key}", current)
+        if not _same(str(wanted), current[key]):
+            return MatchDecision("rejected", 0, f"hard_mismatch_{key}", current)
+    query_text = saved.get("confirmed_title") or product.source_query or product.name
+    decision = match_offer(parse_query(query_text[:200]), offer)
+    if decision.status == "ambiguous" and saved.get("manual_confirmation") and known:
+        return MatchDecision("matched", decision.score, "confirmed_saved_identity", current)
+    return decision

@@ -9,9 +9,9 @@ from bs4 import BeautifulSoup
 from ..models import StoreOffer, StoreSearchResult
 from ..pricing import InvalidMoney, parse_money
 from ..security import UnsafeURL, validate_url
-from .base import StoreParseError
+from .base import StoreParseError, validate_search_page
 from .http import HTTPStoreAdapter
-from .structured import _availability, _visible_price, parse_jsonld_offer
+from .structured import StructuredDataMissing, _availability, _visible_price, parse_jsonld_offer
 
 
 def parse_search_results(html: str, base_url: str = "https://www.magazineluiza.com.br"):
@@ -29,13 +29,13 @@ def parse_search_results(html: str, base_url: str = "https://www.magazineluiza.c
         price = _visible_price(link.get_text(" ", strip=True))
         if price is not None or "produto" in title.casefold():
             results.append(StoreSearchResult("magalu", title, url, price, source="magalu"))
-    return list({item.url: item for item in results}.values())
+    return validate_search_page(html, list({item.url: item for item in results}.values()))
 
 
 def parse_offer(html: str, url: str) -> StoreOffer:
     try:
         return parse_jsonld_offer(html, url, "magalu")
-    except StoreParseError:
+    except StructuredDataMissing:
         soup = BeautifulSoup(html, "html.parser")
         title_node = soup.select_one("h1[data-testid='heading-product-title'], h1")
         price_node = soup.select_one("[data-testid='price-value'], .price-template")
@@ -47,7 +47,12 @@ def parse_offer(html: str, url: str) -> StoreOffer:
             raise StoreParseError("preço Magalu inválido") from exc
         availability = soup.select_one("meta[itemprop='availability']")
         available = _availability(availability.get("content") if availability else None)
-        if available is not True:
+        if available is None:
+            raise StoreParseError("disponibilidade Magalu desconhecida") from None
+        currency = soup.select_one("meta[itemprop='priceCurrency']")
+        if currency is None or currency.get("content", "").upper() != "BRL":
+            raise StoreParseError("moeda Magalu não comprovada como BRL") from None
+        if available is False:
             return StoreOffer(
                 "magalu",
                 title_node.get_text(" ", strip=True),

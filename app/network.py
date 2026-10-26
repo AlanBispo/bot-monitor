@@ -5,11 +5,39 @@ from __future__ import annotations
 import asyncio
 import ssl
 from collections.abc import Callable
+from contextlib import contextmanager
 
 import httpcore
 import httpx
 
 from .security import resolve_public_host
+
+
+@contextmanager
+def mapped_network_errors():
+    """Expose the same error contract as HTTPX's built-in transport."""
+    mapping = (
+        (httpcore.ConnectTimeout, httpx.ConnectTimeout),
+        (httpcore.ReadTimeout, httpx.ReadTimeout),
+        (httpcore.WriteTimeout, httpx.WriteTimeout),
+        (httpcore.PoolTimeout, httpx.PoolTimeout),
+        (httpcore.ConnectError, httpx.ConnectError),
+        (httpcore.ReadError, httpx.ReadError),
+        (httpcore.WriteError, httpx.WriteError),
+        (httpcore.RemoteProtocolError, httpx.RemoteProtocolError),
+        (httpcore.LocalProtocolError, httpx.LocalProtocolError),
+        (httpcore.UnsupportedProtocol, httpx.UnsupportedProtocol),
+        (httpcore.NetworkError, httpx.NetworkError),
+        (httpcore.TimeoutException, httpx.TimeoutException),
+        (httpcore.ProtocolError, httpx.ProtocolError),
+    )
+    try:
+        yield
+    except tuple(source for source, _ in mapping) as exc:
+        for source, target in mapping:
+            if isinstance(exc, source):
+                raise target(str(exc)) from exc
+        raise
 
 
 class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
@@ -49,11 +77,13 @@ class _ResponseStream(httpx.AsyncByteStream):
         self._stream = stream
 
     async def __aiter__(self):
-        async for chunk in self._stream:
-            yield chunk
+        with mapped_network_errors():
+            async for chunk in self._stream:
+                yield chunk
 
     async def aclose(self):
-        await self._stream.aclose()
+        with mapped_network_errors():
+            await self._stream.aclose()
 
 
 class PinnedAsyncHTTPTransport(httpx.AsyncBaseTransport):
@@ -87,7 +117,8 @@ class PinnedAsyncHTTPTransport(httpx.AsyncBaseTransport):
             content=request.stream,
             extensions=request.extensions,
         )
-        response = await self._pool.handle_async_request(core_request)
+        with mapped_network_errors():
+            response = await self._pool.handle_async_request(core_request)
         return httpx.Response(
             status_code=response.status,
             headers=response.headers,

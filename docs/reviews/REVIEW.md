@@ -1,63 +1,158 @@
-# Revisão final do Price Monitor Bot
+# Revisão de simplicidade e regressões — 26/10/2026
 
-## Status
+## 1. Status e resumo
 
-**APPROVED** — nenhum defeito bloqueante confirmado permanece. A implementação foi comparada com `docs/SPEC.md`, corrigida nesta execução e validada com testes e transportes determinísticos, sem chamadas a lojas ou Telegram ao vivo.
+**CHANGES_REQUIRED**.
 
-## Resumo da revisão
+Escopo: alterações locais, inclusive arquivos novos, em relação a `3057ad0`, com foco em segurança, regressões, duplicação e complexidade para um monitor pessoal. Foram lidos SPEC, CODER e REVIEWER. Esta revisão substitui o relatório anterior e altera somente este arquivo; não corrige a aplicação.
 
-Foram inspecionados `AGENTS.md`, a especificação integral, as instruções de Coder e Reviewer, o relatório anterior, todos os módulos da aplicação, testes e fixtures, `pyproject.toml`, `.env.example`, `.gitignore` e `README.md`. O relatório anterior foi tratado como pista, não como prova. Os defeitos antigos de agrupamento monetário, disponibilidade e histórico já tinham correções no código fornecido e foram verificados novamente. A revisão encontrou e corrigiu falhas adicionais de sessão, variante, callback, dados estruturados, persistência de identidade e alertas.
+Há correções necessárias que devem ser preservadas: descompressão HTTP, tratamento de erros de transporte, limites de coleta, disponibilidade/moeda explícitas, proteção contra variantes incompatíveis, condições comerciais e recuperação de notificações interrompidas. A arquitetura continua sendo um monólito com SQLite; não houve adição de dependências ou infraestrutura distribuída.
 
-## Validações executadas
+O excesso está principalmente no acúmulo de funcionalidades e estados operacionais, não em uma arquitetura distribuída: diagnóstico persistido, suspensão/rearme de alertas, dois modos de monitoramento e caminhos adicionais de interação. Isso merece redução, mas não justifica reverter o pacote inteiro.
 
-| Comando ou ferramenta | Resultado |
-|---|---|
-| `.venv/bin/python -m pytest` | **PASS** — 158 testes em 5,96 s. |
-| `.venv/bin/ruff check .` | **PASS** — `All checks passed!`. |
-| `.venv/bin/bandit -r app main.py -q` | **PASS** — saída vazia, código 0; nenhum achado. Uma execução sem `-q` também informou zero achados e zero supressões. |
-| `.venv/bin/python -m pip check` | **PASS** — `No broken requirements found.` |
-| `.venv/bin/pip-audit` | **PASS com limitação** — `No known vulnerabilities found`; o pacote local não publicado `price-monitor 0.1.0` foi ignorado pela consulta ao PyPI. |
-| `rg -l` para tokens com formato de Telegram e atribuições preenchidas de segredos, sem imprimir valores e excluindo o `.env` privado, `.venv`, banco e artefatos gerados | **PASS** — nenhum arquivo correspondente. |
-| `rg` para `eval`, `exec`, `pickle`, subprocesso, `shell=True`, supressões e marcadores de trabalho pendente em código e testes | **PASS** — nenhuma ocorrência. |
-| Verificação de `.venv/bin/mypy` e `.venv/bin/pyright` | **Não aplicável** — não há verificador de tipos configurado ou instalado no ambiente do projeto. |
-| `git status --short --branch` | **Indisponível** — o diretório entregue não contém `.git`; diff e histórico não puderam ser examinados. |
+No início da revisão havia 1.178 linhas adicionadas de aplicação/entry point, 859 de testes, 403 de documentação e 75 de scripts, além de 3 no exemplo de ambiente. São adições brutas; não equivalem ao crescimento líquido. `git diff --stat` sozinho não inclui os arquivos novos não rastreados. Parte do volume são testes úteis, não complexidade de produção.
 
-As execuções iniciais da suíte e do lint foram repetidas após cada correção. As falhas intermediárias foram investigadas e corrigidas; os números acima são da validação final.
+Foram reproduzidos quatro problemas abaixo, apesar dos 210 testes aprovados.
 
-## Correções realizadas
+## 2. Validação executada
 
-- `app/stores/amazon.py`: disponibilidade passou a exigir evidência afirmativa inequívoca; texto negativo produz observação indisponível, e texto desconhecido falha sem criar snapshot ou alerta. Mensagens condicionais, como disponibilidade exclusiva para Prime, não são aceitas como compra garantida.
-- `app/query.py` e `app/matching.py`: variantes de busca preservam todos os termos; filtros de preço máximo malformados são rejeitados; modelos de um caractere, tamanhos, unidades equivalentes, condição e cores reconhecidas são comparados de forma determinística. A pontuação lexical ignora unidades e filtros após aplicar restrições rígidas.
-- `app/discovery.py` e `app/stores/structured.py`: ordenação estável das ofertas; falha de um candidato não descarta outros; JSON-LD ambíguo falha de forma segura; indisponibilidade explícita sem preço pode ser observada; tipos Schema.org em forma de URL e moeda ISO BRL são aceitos.
-- `app/bot.py` e `main.py`: callbacks de seleção entram no polling; sessão expirada, oferta alterada ou variante conflitante impedem confirmação; `/anexar` compara identidade; preços condicionais aparecem separadamente; URLs canônicas são validadas; erros SQLite em comandos têm resposta segura; segredos do provedor web entram no filtro de logs.
-- `app/database.py` e `app/models.py`: sessões expiram mesmo sem nova busca e obedecem ao limite de retenção; cortes de histórico usam UTC; identidade conhecida e incerteza inicial do listing são persistidas, inclusive na migração de um banco existente.
-- `app/monitor.py` e `app/alerts.py`: monitoramento direto usa concorrência limitada, impede ciclos simultâneos e ignora produto ou loja divergente; o registro de alerta antecede o envio, e uma entrega que falha remove a tentativa para permitir repetição controlada.
-- `.env.example` e `README.md`: documentam limites, flags de automação de navegador desativadas, DNS público para descoberta web, matching, expiração e operação local.
-- Testes novos ou reforçados cobrem o cenário obrigatório, as três lojas com transporte HTTP falso, disponibilidade negativa/desconhecida, moeda e JSON-LD, matching e variantes, sessões, redirects, autorização, isolamento de falhas, migração SQLite, histórico, erro de banco e ordem de persistência dos alertas.
+Ambiente: Windows, `.venv`, Python 3.12.10. Comandos executados na raiz do projeto.
 
-## Achados bloqueantes restantes
+| Verificação | Resultado |
+| --- | --- |
+| `.venv\Scripts\python.exe -m pytest` | **210 passed**, 7,45 s. |
+| `.venv\Scripts\python.exe -m ruff check .` | PASS. |
+| `.venv\Scripts\python.exe -m bandit -q -r app main.py` | PASS, saída 0, sem achados. |
+| `.venv\Scripts\python.exe -m pip check` | PASS, sem dependências quebradas. |
+| `.venv\Scripts\python.exe -m pip_audit --progress-spinner off` | Sem vulnerabilidades conhecidas nas dependências auditadas; o pacote local `price-monitor` não existe no PyPI e foi ignorado pelo auditor. |
+| Parser de PowerShell nos dois scripts de `scripts/` | Zero erros de sintaxe; scripts não executados nem instalados. |
+| Busca de assinatura de token Telegram em 51 arquivos de código, testes, documentação e configuração de exemplo | Nenhuma ocorrência; pesquisa limitada a essa assinatura, sem imprimir segredos. |
+| Probes Python por stdin, com URLs fictícias e SQLite temporário | Reproduziram R01–R04 e a suspensão de alertas descrita em C01. |
+| Migração a partir da implementação de banco de `HEAD` | Reproduziu R01 usando o esquema anterior real, sem alterar o banco pessoal. |
 
-Nenhum.
+Verificação de tipos não está configurada e não foi executada. Nenhuma mensagem foi enviada ao Telegram e nenhuma loja foi acessada nesta revisão.
 
-## Achados não bloqueantes
+## 3. Achados bloqueantes confirmados
 
-- **INFO — risco de compatibilidade futura, `app/network.py:14`:** a conexão com IP validado utiliza uma classe interna de `httpcore`. Funciona e foi testada no ambiente instalado; uma versão futura da biblioteca pode alterar essa interface. Revalidar o transporte ao atualizar `httpx`/`httpcore`.
+### R01 — HIGH — Migração pode eliminar o único monitoramento ativo de uma oferta
 
-## Requisitos de `docs/SPEC.md` ainda não atendidos
+**Local:** `app/database.py:197–215`; recuperação em `app/database.py:389–403`.
 
-Nenhum requisito central foi identificado como incompleto após as correções. A automação de navegador e a estimativa de frete por CEP permanecem desativadas conforme o escopo opcional; preços sem frete confiável continuam fora do menor preço garantido e dos alertas.
+**Problema:** a migração elege a primeira identidade encontrada por ID, independentemente de o produto/listing estar ativo. Uma oferta antiga desativada pode ficar com a chave única; a oferta ativa equivalente vira `active = 0` e `validation_status = 'duplicate'`.
 
-## Testes ausentes ou insuficientes
+**Reprodução:** usando a classe Database do commit base, cadastrar um ASIN com `?tag=old`, desativá-lo e recadastrar o mesmo ASIN com `?tag=new`. Antes da atualização há um listing ativo. Após `Database.initialize()` atual, há zero listings ativos, embora o segundo produto continue ativo. `/reativar` desse produto também não recupera a oferta, pois só reativa listings `confirmed`.
 
-Nenhuma lacuna bloqueante conhecida. Não foram executados testes prolongados do scheduler, simulação de corrupção ou esgotamento de disco SQLite, nem chamadas reais às lojas ou ao Telegram. Esses testes externos não são usados como prova de correção nesta revisão, conforme o pedido de fixtures determinísticas.
+**Impacto:** a atualização interrompe um monitoramento existente sem ação do usuário. O histórico é preservado, mas novas verificações e alertas deixam de ocorrer.
 
-## Avaliação de segurança
+**Correção mínima:** ao resolver colisões legadas, preservar um representante ativo cujo produto também esteja ativo. Se houver múltiplos representantes ativos com alvos/produtos diferentes, tratar o conflito explicitamente, sem escolher silenciosamente o menor ID. Manter snapshots e IDs históricos. Testar migração e recuperação.
 
-Os comandos e callbacks exigem chat privado autorizado. URLs de produto e redirects passam por validação de esquema e domínio, resolução DNS pública e conexão fixada ao endereço validado; corpos HTTP, redirecionamentos, candidatos, concorrência e timeouts são limitados. SQL usa parâmetros. Não foram encontrados execução de conteúdo externo, bypass de CAPTCHA, segredos preenchidos em código/testes/documentação ou supressões da análise estática. `.env` existe localmente e está em `.gitignore`; seu conteúdo privado não foi exibido nem usado em testes. Sem `.git`, não é possível afirmar nada sobre commits anteriores.
+### R02 — HIGH — SKU de uma loja vira restrição global do produto
 
-## Limitações conhecidas da revisão
+**Local:** `app/matching.py:160–172`; atributos coletados em `app/stores/structured.py:208–216`; uso em `app/bot.py:441–444,562–569`.
 
-- A compatibilidade com HTML atual das lojas, proteção anti-bot e entrega real do Telegram não foi verificada ao vivo. O comportamento foi provado com fixtures e transportes falsos.
-- Não havia `.git`, então diff, histórico e estado de versionamento não estavam disponíveis.
-- Não há verificador de tipos configurado; a auditoria de vulnerabilidades não examinou o próprio pacote local não publicado.
-- Uma interrupção do processo entre reservar um alerta e enviá-lo pode deixar a tentativa registrada sem entrega. Sem uma confirmação transacional do Telegram, a aplicação prioriza evitar envios duplicados; falhas de envio confirmadas removem a tentativa e podem ser repetidas.
+**Problema:** `match_product()` exige igualdade de todos os atributos persistidos, incluindo `sku`. O SKU identifica o catálogo do vendedor/loja e não precisa coincidir entre duas ofertas equivalentes.
+
+**Reprodução:** registrar `Sabao OMO 3L` com atributos `brand=OMO, sku=shop-123`. A oferta de outra loja com o mesmo título e marca, mas `sku=other-456`, retorna `rejected / hard_mismatch_sku`. Se a segunda loja não informar SKU, retorna `ambiguous / saved_attribute_unknown_sku`; os handlers também recusam a anexação.
+
+**Impacto:** o fluxo de acompanhar o mesmo produto em várias lojas pode ser bloqueado por metadados específicos de uma oferta. A nova validação também pode parar o monitoramento quando a loja deixa de publicar seu SKU, sem mudança do produto.
+
+**Correção mínima:** restringir a identidade compartilhada aos atributos comparáveis entre lojas: modelo, capacidade, tamanho, quantidade, condição e outros comprovadamente globais. SKU deve continuar associado ao listing/loja. Não remover as verificações de variante que corrigem defeitos reais.
+
+### R03 — MEDIUM — Números descritivos adicionais são tratados como troca de modelo
+
+**Local:** `app/identity.py:120–123`; `app/matching.py:114–124`.
+
+**Problema:** todos os números fora das unidades reconhecidas entram em uma única string `model_numbers`, comparada por igualdade. Informações adicionais sobre tela, resolução ou rendimento acabam misturadas com o modelo.
+
+**Reprodução:** `Apple iPhone 15 128GB` contra `Apple iPhone 15 128GB Tela 6,1 polegadas` retorna `rejected / hard_mismatch_model`. O conjunto de números do segundo título inclui as dimensões da tela, embora o modelo solicitado continue explicitamente sendo iPhone 15.
+
+**Impacto:** ofertas válidas desaparecem da classificação e mudanças meramente descritivas de título podem interromper a coleta de um produto salvo.
+
+**Correção mínima:** usar evidência de modelo identificável, sem exigir igualdade de todos os números incidentais do título. Quando não for possível identificar a função do número, manter a incerteza em vez de afirmar incompatibilidade. Preservar a rejeição de iPhone 14 versus 15 e os testes de variantes realmente distintas; não criar um catálogo genérico de exceções.
+
+### R04 — MEDIUM — Regex incompleta permite fallback após JSON-LD de produto malformado
+
+**Local:** `app/stores/structured.py:83–96`; fallback em `app/stores/magalu.py:38` e `app/stores/mercadolivre.py:45`.
+
+**Problema:** após falha de JSON, a presença de Product é detectada por regex que só reconhece a representação simples do tipo. O código diferencia formas equivalentes de declarar um produto e pode tratar dados inválidos como ausência de dados estruturados.
+
+**Reprodução:** junto de HTML de fallback com título, preço BRL e disponibilidade explícita, o fragmento malformado `{"@type":"Product","offers":` é recusado. Os fragmentos igualmente malformados `{"@type":["Product"],"offers":` e `{"@type":"https://schema.org/Product","offers":` são aceitos pelo fallback Magalu e retornam R$ 99,90. Não houve acesso externo.
+
+**Impacto:** a garantia de não contornar evidência estruturada inválida depende da grafia de `@type`, permitindo aceitar uma oferta que deveria falhar de maneira conservadora.
+
+**Correção mínima:** adotar uma política única e conservadora para JSON-LD inválido. O caminho mais simples é recusar dados estruturados malformados antes de considerar fallback, com testes das representações em lista e URL. Não tentar implementar um parser de JSON com regex.
+
+## 4. Achados não bloqueantes e cortes recomendados
+
+### C01 — LOW — Entrega de alertas ganhou um protocolo operacional maior que o necessário
+
+**Local:** `app/alerts.py:40–119`; `app/database.py:795–870`; `app/bot.py:699–716,796`.
+
+A pendência persistida é justificada pelos defeitos anteriores de cancelamento/reentrada. Já os estados `failed/cancelled`, contagem de tentativas, suspensão na terceira falha, rearme global por `/check` e métodos SQL separados ampliam bastante a manutenção. O comportamento é intencional e documentado, não uma falha desconhecida: três erros de envio seguidos de recuperação deixam zero alertas entregues e um registro `failed` até intervenção ou nova condição elegível.
+
+**Recomendação:** manter confirmação de envio e pendência recuperável, mas simplificar a política. Uma tentativa por ciclo, sem laço interno de retry, reaproveita o intervalo já existente; a observação atual decide se a pendência ainda faz sentido. Unificar as atualizações de preço/referência/tentativa em uma operação transacional. Avaliar o custo da suspensão manual antes de mantê-la; não voltar a registrar alertas como enviados antes da confirmação.
+
+### C02 — LOW — Estado de diagnóstico duplica informação e aparenta controlar o scheduler
+
+**Local:** `app/database.py:179–187,479–517`; `app/models.py:73–78`; `app/bot.py:699–758`.
+
+`next_check_at` é gravado após cada coleta, mas não controla quando o scheduler executa. Um `/check` entre dois ciclos muda a estimativa persistida sem mudar o próximo disparo real. Contadores cumulativos, proporção de frete conhecido, aviso de degradação/recuperação e detalhes extensos de `/status` são funcionalidades operacionais adicionais, não correções de segurança.
+
+**Recomendação:** manter última tentativa/sucesso/erro e um resumo curto. Se exibir a próxima execução, usar o scheduler como fonte de verdade, sem persistir uma segunda agenda. Contadores cumulativos e avisos de saúde são candidatos a corte se não forem usados; manter `last_error` e a proteção que impede apresentar preço antigo como atual. Na limpeza, não apagar colunas de um banco pessoal só para diminuir o esquema.
+
+### C03 — INFO — Segundo modo de monitoramento é uma decisão de produto, não hardening
+
+**Local:** `app/alerts.py:91–145`; `app/models.py:54–55`; `app/bot.py:317–371`; `app/database.py:248–322`.
+
+O modo `price_drop` adiciona baseline próprio por listing, ramificações de alerta, mensagens, estado no banco e uma segunda semântica para `target_price`. A SPEC permite alertas adicionais, mas só exige o de preço-alvo. `docs/IMPLEMENTACAO.md` informa que o cadastro sem alvo e a inicialização vieram de trabalho paralelo; não é possível atribuir todo esse escopo a um único agente.
+
+**Recomendação:** se queda sem alvo não fizer parte do uso real, conservar apenas o fluxo de alvo. Se fizer, preservar o recurso e evitar usar uma coluna chamada `target_price` para representar uma referência de outro significado. A revisão não remove esse comportamento nem presume que nunca foi solicitado.
+
+### C04 — LOW — Código sem consumidor e adaptação de handlers podem ser enxugados
+
+**Local:** `app/database.py:871`; `app/bot.py:79,532–535`; `app/matching.py:23–24`.
+
+`delete_alert()` ficou sem chamadas após a nova política. `format_search_results()` só é chamado por teste, sem caminho de execução da aplicação. `_title_attributes()` apenas repassa a chamada a `explicit_attributes()`. Os dois últimos já existiam na base; são sobras a limpar, não prova de excesso novo. A seleção guiada fabrica um `SimpleNamespace` para chamar outro handler e repete o parsing monetário.
+
+**Recomendação:** remover código comprovadamente sem consumidor e o wrapper sem função. Compartilhar a operação de selecionar/registrar entre os dois handlers por parâmetros explícitos, sem criar contexto Telegram artificial. Ajustar os testes para validar os caminhos reais, sem removê-los apenas para reduzir contagem.
+
+### C05 — INFO — Consolidar documentação e preservar comentários que explicam riscos reais
+
+**Local:** `README.md`, `docs/OPERACAO.md`, `docs/IMPLEMENTACAO.md`; comentários em `app/network.py`, `app/stores/http.py` e `app/alerts.py`.
+
+O registro de implementação repete detalhes e resultados já presentes nos documentos de operação/revisão. Pode ser arquivado ou eliminado após consolidar instruções úteis em README/OPERACAO. A operação detalhada tem uso concreto e não precisa ser convertida em comentários de código.
+
+**Recomendação:** remover comentários narrativos ou redundantes durante uma implementação de limpeza. Preservar explicações sobre descompressão, DNS pinado, frete desconhecido, limites de fallback e cancelamento de envio: essas restrições não são óbvias e evitam regressões. Há ainda compatibilidade com doubles de teste preexistente, como o `except TypeError` de markup; revisar os doubles em vez de expandir exceções de produção para acomodá-los.
+
+## 5. Requisitos da SPEC ainda não satisfeitos
+
+- **§§7, 9 e 17:** anexar ofertas equivalentes de várias lojas não é confiável quando seus SKUs diferem ou estão ausentes, conforme R02.
+- **§§6.2 e 23:** atualização não preserva a continuidade do monitoramento no cenário legado de R01.
+- **§8.3:** a identificação de modelo confunde números incidentais com conflito explícito, conforme R03.
+- **§33.1:** a extração/fallback não falha consistentemente diante de Product malformado, conforme R04.
+- **§31:** a entrega permanece sem aprovação por causa das regressões confirmadas. Esta revisão não homologa operação real de Amazon, Mercado Livre e Magalu.
+
+## 6. Testes ausentes ou insuficientes
+
+Faltam regressões para: duplicata antiga inativa versus atual ativa em esquema anterior real; anexação do mesmo produto com SKUs diferentes/ausentes; números incidentais no título sem mudança de modelo; e Product malformado com tipos em lista/URL antes de fallback.
+
+Os testes novos de HTTP, autorização, condições comerciais, timeout e recuperação de alertas exercitam requisitos úteis. Não há motivo para removê-los em massa. O teste de três tentativas comprova a política atual; não comprova recuperação automática após a terceira falha.
+
+## 7. Avaliação de segurança
+
+Manter autorização de chat privado, proteção de URLs/DNS/redirects, timeouts, limite de resposta decodificada, Decimal, queries parametrizadas, isolamento das lojas e distinção de frete/desconto desconhecido. Essas proteções têm requisitos concretos na SPEC e não são overengineering para este bot.
+
+Não foram identificadas novas dependências, exposição de token na pesquisa limitada ou bypass de autorização. R04 é um defeito confirmado de validação conservadora, não evidência de SSRF, execução remota ou vazamento de segredo. Ferramentas estáticas aprovadas não substituem esses testes de lógica.
+
+## 8. Ordem sugerida para uma implementação enxuta
+
+1. Corrigir R01–R04 com mudanças locais e testes dos comportamentos reproduzidos.
+2. Remover sobras sem consumidor e consolidações triviais de C04/C05.
+3. Simplificar entrega de alertas e diagnóstico de C01/C02, preservando recuperação e dados válidos.
+4. Tratar a permanência do modo sem alvo de C03 como escolha funcional; não apagá-lo incidentalmente em um hardening.
+
+Não recomendo criar camadas, serviços, framework de comandos, barramento de eventos ou novas dependências para fazer essa limpeza.
+
+## 9. Limitações
+
+Revisão do working tree atual, sem commits separados que permitam atribuir cada mudança ao agente de revisão ou ao trabalho paralelo. Probes não foram incorporados à suíte porque a tarefa é de revisão; a aplicação não foi editada. Banco pessoal, `.env` real, Telegram, lojas ao vivo, instalação de tarefa Windows, piloto prolongado e Python 3.11 não foram usados/validados. A análise de segredos foi limitada à assinatura pesquisada. O relatório anterior descrevia outra etapa e foi substituído, não tratado como evidência de que seus achados antigos continuavam presentes.

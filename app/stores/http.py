@@ -21,9 +21,14 @@ async def request_limited(
             if len(body) + len(chunk) > max_response_bytes:
                 raise StoreError("resposta excede o limite configurado")
             body.extend(chunk)
+        headers = response.headers.copy()
+        # aiter_bytes has already decoded Content-Encoding. Reusing that header
+        # would ask HTTPX to decompress the decoded body a second time.
+        for name in ("content-encoding", "content-length", "transfer-encoding"):
+            headers.pop(name, None)
         return httpx.Response(
             status_code=response.status_code,
-            headers=response.headers,
+            headers=headers,
             content=bytes(body),
             request=response.request,
         )

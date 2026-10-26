@@ -51,6 +51,8 @@ class Product:
     updated_at: datetime
     identity_json: str | None = None
     source_query: str | None = None
+    # The legacy target_price column stores the captured reference in price_drop mode.
+    monitoring_mode: Literal["target", "price_drop"] = "target"
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,9 @@ class Listing:
     discovery_source: str | None = None
     validation_status: str = "confirmed"
     uncertainty: str | None = None
+    last_checked_at: datetime | None = None
+    last_success_at: datetime | None = None
+    last_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,7 +97,8 @@ class Alert:
     alert_type: str
     price: Decimal
     target_price: Decimal
-    sent_at: datetime
+    sent_at: datetime | None
+    status: str = "sent"
 
 
 @dataclass(frozen=True)

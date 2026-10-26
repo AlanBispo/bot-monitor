@@ -15,6 +15,7 @@ from .query import SearchQuery
 from .security import UnsafeURL, validate_url
 from .stores.base import StoreAdapter, StoreError
 from .stores.http import request_limited
+from .urls import listing_url
 
 LOGGER = logging.getLogger(__name__)
 
@@ -143,6 +144,7 @@ class JsonWebDiscoveryProvider(DiscoveryProvider):
         name="web",
         max_response_bytes: int = 1_000_000,
         timeout_seconds: float = 10,
+        api_format: str = "json",
     ):
         self.endpoint = validate_url(endpoint)
         self.api_key = api_key
@@ -150,8 +152,14 @@ class JsonWebDiscoveryProvider(DiscoveryProvider):
         self.name = name
         self.max_response_bytes = max(1024, max_response_bytes)
         self.timeout_seconds = max(0.1, timeout_seconds)
+        if api_format not in {"json", "searxng"}:
+            raise ValueError("formato de descoberta deve ser json ou searxng")
+        self.api_format = api_format
 
     async def discover(self, query: SearchQuery) -> list[CandidateURL]:
+        params = {"q": query.normalized_text}
+        if self.api_format == "searxng":
+            params.update({"format": "json", "language": "pt-BR", "categories": "general"})
         if self.client is None:
             import httpx
 
@@ -167,7 +175,7 @@ class JsonWebDiscoveryProvider(DiscoveryProvider):
                     client,
                     self.endpoint,
                     self.max_response_bytes,
-                    params={"q": query.normalized_text},
+                    params=params,
                     headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
                 )
         else:
@@ -175,11 +183,13 @@ class JsonWebDiscoveryProvider(DiscoveryProvider):
                 self.client,
                 self.endpoint,
                 self.max_response_bytes,
-                params={"q": query.normalized_text},
+                params=params,
                 headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
             )
         response.raise_for_status()
         payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            raise StoreError("resposta de descoberta sem lista de resultados válida")
         found = []
         for item in payload.get("results", []):
             if not isinstance(item, dict) or not isinstance(item.get("url"), str):
@@ -352,7 +362,7 @@ class DiscoveryOrchestrator:
         for candidate, offer, decision, pricing, error in validated:
             if offer is None or decision is None:
                 continue
-            listing_key = self._canonical(offer.canonical_url or offer.url)
+            listing_key = listing_url(offer.url, offer.canonical_url)
             if listing_key in seen_listings:
                 continue
             seen_listings.add(listing_key)
@@ -377,7 +387,8 @@ class DiscoveryOrchestrator:
             for index, result in enumerate(results, 1)
         ]
         coverage["validated"] = len(results)
-        coverage["validation_failed"] = len(unique) - len(results)
+        coverage["validation_failed"] = sum(item[1] is None for item in validated)
+        coverage["duplicates"] = len(unique) - coverage["validation_failed"] - len(results)
         coverage["ambiguous"] = sum(result.decision.status == "ambiguous" for result in results)
         coverage["rejected"] = sum(result.decision.status == "rejected" for result in results)
         coverage["unknown_shipping"] = sum(
@@ -385,6 +396,8 @@ class DiscoveryOrchestrator:
             and "shipping_unknown" in result.uncertainty.split(",")
             for result in results
         )
-        status = "partial" if any(item[2] for item in provider_results) else "complete"
+        status = "partial" if (
+            any(item[2] for item in provider_results) or coverage["validation_failed"]
+        ) else "complete"
         coverage["status"] = status
         return SearchOutcome(query, tuple(results), coverage, status)

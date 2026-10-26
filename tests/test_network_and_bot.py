@@ -10,9 +10,9 @@ from decimal import Decimal
 import httpx
 import pytest
 
-from app.bot import TelegramBot, format_search_results, split_telegram_text
+from app.bot import TelegramBot, split_telegram_text
 from app.database import Database
-from app.models import StoreOffer, StoreSearchResult
+from app.models import StoreOffer
 from app.network import _PinnedNetworkBackend
 from app.security import UnsafeURL, resolve_public_host
 from app.stores.amazon import AmazonAdapter
@@ -138,11 +138,8 @@ async def test_required_store_blocked_response_fails_without_retry_or_bypass(ada
 
 
 def test_telegram_text_is_split_under_platform_limit_and_long_records_are_split():
-    results = [
-        StoreSearchResult("amazon", "Produto", "https://amazon.example/" + "x" * 1900, None)
-        for _ in range(10)
-    ]
-    chunks = split_telegram_text(format_search_results(results))
+    records = ["Produto\nhttps://amazon.example/" + "x" * 1900 for _ in range(10)]
+    chunks = split_telegram_text("\n".join(records))
     assert len(chunks) > 1
     assert all(len(chunk) <= 4096 for chunk in chunks)
     oversized = split_telegram_text("x" * 5000)
@@ -173,7 +170,7 @@ class FakeMessage:
     def __init__(self):
         self.replies = []
 
-    async def reply_text(self, message):
+    async def reply_text(self, message, **kwargs):
         self.replies.append(message)
 
 

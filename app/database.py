@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from collections import defaultdict
@@ -13,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
+from .identity import explicit_attributes
 from .models import (
     Alert,
     HistoryStats,
@@ -22,6 +24,10 @@ from .models import (
     SearchEntry,
     SearchSession,
 )
+from .pricing import PricingResult, parse_money
+from .urls import listing_key
+
+LOGGER = logging.getLogger(__name__)
 
 
 class DatabaseError(RuntimeError):
@@ -164,12 +170,91 @@ class Database:
             )
             self._ensure_column(connection, "products", "identity_json", "TEXT")
             self._ensure_column(connection, "products", "source_query", "TEXT")
+            self._ensure_column(
+                connection, "products", "monitoring_mode", "TEXT NOT NULL DEFAULT 'target'"
+            )
             self._ensure_column(connection, "listings", "canonical_url", "TEXT")
             self._ensure_column(connection, "listings", "discovery_source", "TEXT")
             self._ensure_column(
                 connection, "listings", "validation_status", "TEXT NOT NULL DEFAULT 'confirmed'"
             )
             self._ensure_column(connection, "listings", "uncertainty", "TEXT")
+            for column, definition in {
+                "identity_key": "TEXT", "last_checked_at": "TEXT", "last_success_at": "TEXT",
+                "last_error": "TEXT",
+            }.items():
+                self._ensure_column(connection, "listings", column, definition)
+            self._ensure_column(connection, "alerts", "status", "TEXT NOT NULL DEFAULT 'sent'")
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_identity ON listings(identity_key)"
+            )
+            connection.execute(
+                """DELETE FROM alerts WHERE status IN ('pending', 'failed') AND id NOT IN
+                   (SELECT MAX(id) FROM alerts WHERE status IN ('pending', 'failed')
+                    GROUP BY listing_id, alert_type)"""
+            )
+            connection.execute("UPDATE alerts SET status = 'pending' WHERE status = 'failed'")
+            connection.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_alert
+                   ON alerts(listing_id, alert_type) WHERE status = 'pending'"""
+            )
+            self._migrate_listing_identities(connection)
+            legacy = connection.execute(
+                """SELECT p.id, l.title FROM products p JOIN listings l ON l.product_id = p.id
+                   WHERE p.identity_json IS NULL AND l.validation_status = 'confirmed'
+                   ORDER BY l.id"""
+            ).fetchall()
+            seen_products: set[int] = set()
+            for row in legacy:
+                if row["id"] in seen_products:
+                    continue
+                seen_products.add(row["id"])
+                connection.execute(
+                    "UPDATE products SET identity_json = ? WHERE id = ?",
+                    (json.dumps({"attributes": explicit_attributes(row["title"]),
+                                 "confirmed_title": row["title"],
+                                 "registration_source": "legacy_listing"},
+                                ensure_ascii=False, sort_keys=True), row["id"]),
+                )
+
+    @staticmethod
+    def _migrate_listing_identities(connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """SELECT l.*, p.active AS product_active FROM listings l
+               JOIN products p ON p.id = l.product_id
+               ORDER BY p.active DESC, l.active DESC, l.id"""
+        ).fetchall()
+        groups = defaultdict(list)
+        for row in rows:
+            groups[listing_key(row["store"], row["url"], row["canonical_url"])].append(row)
+        for key, listings in groups.items():
+            winner = listings[0]
+            connection.execute("UPDATE listings SET identity_key = NULL WHERE identity_key = ?",
+                               (key,))
+            connection.execute("UPDATE listings SET identity_key = ? WHERE id = ?",
+                               (key, winner["id"]))
+            # Recover active products disabled by the previous duplicate migration.
+            if winner["product_active"] and winner["validation_status"] == "duplicate":
+                connection.execute(
+                    """UPDATE listings SET active = 1, validation_status = 'confirmed',
+                       uncertainty = NULL WHERE id = ?""", (winner["id"],),
+                )
+            for row in listings[1:]:
+                if row["product_active"] and row["active"] and (
+                    row["product_id"] != winner["product_id"]
+                ):
+                    LOGGER.warning("oferta duplicada nos produtos %s e %s; cadastros preservados",
+                                   winner["product_id"], row["product_id"])
+                    connection.execute(
+                        "UPDATE listings SET uncertainty = 'duplicate_conflict' WHERE id = ?",
+                        (row["id"],),
+                    )
+                else:
+                    connection.execute(
+                        """UPDATE listings SET active = 0, validation_status = 'duplicate',
+                           uncertainty = ? WHERE id = ?""",
+                        (f"duplicate_of:{winner['id']}", row["id"]),
+                    )
 
     @staticmethod
     def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str):
@@ -184,14 +269,19 @@ class Database:
         *,
         identity_json: str | None = None,
         source_query: str | None = None,
+        monitoring_mode: str = "target",
     ) -> Product:
+        if monitoring_mode not in {"target", "price_drop"}:
+            raise ValueError("modo de monitoramento inválido")
         now = utc_now()
         with self.connection() as connection:
             cursor = connection.execute(
                 """INSERT INTO products
-                   (name, target_price, created_at, updated_at, identity_json, source_query)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (name.strip(), str(target_price), now, now, identity_json, source_query),
+                   (name, target_price, created_at, updated_at, identity_json, source_query,
+                    monitoring_mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (name.strip(), str(target_price), now, now, identity_json, source_query,
+                 monitoring_mode),
             )
             product_id = int(cursor.lastrowid)
         return self.get_product(product_id)
@@ -210,32 +300,56 @@ class Database:
         identity_json: str | None = None,
         source_query: str | None = None,
         uncertainty: str | None = None,
+        monitoring_mode: str = "target",
+        initial_pricing: PricingResult | None = None,
     ) -> tuple[Product, Listing]:
-        """Create a product and its first listing in one transaction."""
+        """Create a product, first listing and optional initial observation atomically."""
+        if monitoring_mode not in {"target", "price_drop"}:
+            raise ValueError("modo de monitoramento inválido")
         now = utc_now()
         try:
             with self.connection() as connection:
                 product_cursor = connection.execute(
                     """INSERT INTO products
-                       (name, target_price, created_at, updated_at, identity_json, source_query)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (name.strip(), str(target_price), now, now, identity_json, source_query),
+                       (name, target_price, created_at, updated_at, identity_json, source_query,
+                        monitoring_mode)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (name.strip(), str(target_price), now, now, identity_json, source_query,
+                     monitoring_mode),
                 )
                 product_id = int(product_cursor.lastrowid)
                 listing_cursor = connection.execute(
                     """INSERT INTO listings
                        (product_id, store, url, title, seller, created_at, updated_at,
-                        canonical_url, discovery_source, validation_status, uncertainty)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?)""",
+                        canonical_url, discovery_source, validation_status,
+                        uncertainty, identity_key)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?)""",
                     (
                         product_id, store, url, title, seller, now, now,
                         canonical_url, discovery_source, uncertainty,
+                        listing_key(store, url, canonical_url),
                     ),
                 )
                 listing_id = int(listing_cursor.lastrowid)
+                if initial_pricing is not None:
+                    connection.execute(
+                        """INSERT INTO price_history
+                           (listing_id, product_price, shipping_price, confirmed_discount,
+                            possible_discount, effective_price, possible_effective_price,
+                            available, seller, captured_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                        (listing_id, self._decimal(initial_pricing.product_price),
+                         self._decimal(initial_pricing.shipping_price),
+                         self._decimal(initial_pricing.confirmed_discount),
+                         self._decimal(initial_pricing.possible_discount),
+                         self._decimal(initial_pricing.effective_price),
+                         self._decimal(initial_pricing.possible_effective_price), seller, now),
+                    )
         except sqlite3.IntegrityError as exc:
-            if "listings.url" in str(exc):
-                raise DuplicateListingError("Essa URL já está cadastrada.") from None
+            if "listings.url" in str(exc) or "listings.identity_key" in str(exc):
+                raise DuplicateListingError(
+                    "Essa oferta já está cadastrada. Consulte /lista ou /reativar ID."
+                ) from None
             raise DatabaseError("não foi possível salvar o cadastro") from exc
         except sqlite3.Error as exc:
             raise DatabaseError("não foi possível salvar o cadastro") from exc
@@ -274,7 +388,43 @@ class Database:
                 "UPDATE listings SET active = 0, updated_at = ? WHERE product_id = ?",
                 (now, product_id),
             )
+            connection.execute(
+                """DELETE FROM alerts WHERE status = 'pending'
+                   AND listing_id IN (SELECT id FROM listings WHERE product_id = ?)""",
+                (product_id,),
+            )
         return True
+
+    def update_target(self, product_id: int, target: Decimal) -> Product:
+        target = parse_money(target)
+        with self.connection() as connection:
+            cursor = connection.execute(
+                """UPDATE products SET target_price = ?, monitoring_mode = 'target', updated_at = ?
+                   WHERE id = ?""",
+                (str(target), utc_now(), product_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError("produto não encontrado")
+            connection.execute(
+                """DELETE FROM alerts WHERE status = 'pending'
+                   AND listing_id IN (SELECT id FROM listings WHERE product_id = ?)""",
+                (product_id,),
+            )
+        return self.get_product(product_id)
+
+    def reactivate_product(self, product_id: int) -> Product:
+        self.get_product(product_id)
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE products SET active = 1, updated_at = ? WHERE id = ?",
+                (utc_now(), product_id),
+            )
+            connection.execute(
+                """UPDATE listings SET active = 1, updated_at = ?
+                   WHERE product_id = ? AND validation_status = 'confirmed'""",
+                (utc_now(), product_id),
+            )
+        return self.get_product(product_id)
 
     def add_listing(
         self,
@@ -295,17 +445,19 @@ class Database:
                 cursor = connection.execute(
                     """INSERT INTO listings
                        (product_id, store, url, title, seller, created_at, updated_at,
-                        canonical_url, discovery_source, validation_status, uncertainty)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        canonical_url, discovery_source, validation_status,
+                        uncertainty, identity_key)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         product_id, store, url, title, seller, now, now,
                         canonical_url, discovery_source, validation_status, uncertainty,
+                        listing_key(store, url, canonical_url),
                     ),
                 )
                 listing_id = int(cursor.lastrowid)
         except sqlite3.IntegrityError as exc:
-            if "listings.url" in str(exc):
-                raise DuplicateListingError("Essa URL já está cadastrada.") from None
+            if "listings.url" in str(exc) or "listings.identity_key" in str(exc):
+                raise DuplicateListingError("Essa oferta já está cadastrada.") from None
             raise DatabaseError("não foi possível salvar o listing") from exc
         except sqlite3.Error as exc:
             raise DatabaseError("não foi possível salvar o listing") from exc
@@ -346,6 +498,16 @@ class Database:
             connection.execute(
                 "UPDATE listings SET active = 0, updated_at = ? WHERE id = ?",
                 (utc_now(), listing_id),
+            )
+
+    def record_check(self, listing_id: int, *, error: str | None = None) -> None:
+        now = utc_now()
+        with self.connection() as connection:
+            connection.execute(
+                """UPDATE listings SET last_checked_at = ?, last_error = ?,
+                   last_success_at = CASE WHEN ? IS NULL THEN ? ELSE last_success_at END
+                   WHERE id = ?""",
+                (now, error, error, now, listing_id),
             )
 
     def add_snapshot(
@@ -508,6 +670,14 @@ class Database:
             rows = connection.execute(query, params).fetchall()
         return [self._snapshot(row) for row in rows]
 
+    def latest_snapshot(self, listing_id: int) -> PriceSnapshot | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM price_history WHERE listing_id = ? ORDER BY id DESC LIMIT 1",
+                (listing_id,),
+            ).fetchone()
+        return self._snapshot(row) if row else None
+
     def product_history(
         self, product_id: int, since: datetime | None = None
     ) -> list[PriceSnapshot]:
@@ -535,13 +705,19 @@ class Database:
         return grouped
 
     def history_stats(self, listing_id: int, since: datetime | None = None) -> HistoryStats:
-        return self._stats(self.history(listing_id, since))
+        stats = self._stats(self.history(listing_id, since))
+        listing = self.get_listing(listing_id)
+        if listing.last_error or not listing.active:
+            return replace(stats, current_price=None, current_uncertain=True)
+        return stats
 
     def product_history_stats(self, product_id: int, since: datetime | None = None) -> HistoryStats:
         self.get_product(product_id)
         rows = self.product_history(product_id, since)
         stats = self._stats(rows)
-        current_price, current_uncertain = self._current_from_latest_per_listing(rows)
+        current_price, current_uncertain = self._current_from_healthy_listings(
+            rows, product_id=product_id,
+        )
         return replace(
             stats,
             current_price=current_price,
@@ -557,8 +733,23 @@ class Database:
         for row in self.product_history(product_id, since):
             grouped[listings[row.listing_id].store].append(row)
         return {
-            store: self._current_from_latest_per_listing(rows) for store, rows in grouped.items()
+            store: self._current_from_healthy_listings(rows, product_id=product_id, store=store)
+            for store, rows in grouped.items()
         }
+
+    def _current_from_healthy_listings(
+        self, rows: list[PriceSnapshot], *, product_id: int, store: str | None = None,
+    ) -> tuple[Decimal | None, bool]:
+        listings = {
+            listing.id: listing for listing in self.list_listings(active_only=True)
+            if listing.product_id == product_id and (store is None or listing.store == store)
+        }
+        healthy_rows = [row for row in rows if row.listing_id in listings
+                        and listings[row.listing_id].last_error is None]
+        price, uncertain = self._current_from_latest_per_listing(healthy_rows)
+        observed = {row.listing_id for row in healthy_rows}
+        incomplete = any(item.last_error or item.id not in observed for item in listings.values())
+        return price, uncertain or incomplete
 
     @staticmethod
     def _stats(rows: list[PriceSnapshot]) -> HistoryStats:
@@ -599,7 +790,7 @@ class Database:
     def last_alert(self, listing_id: int, alert_type: str) -> Alert | None:
         with self.connection() as connection:
             row = connection.execute(
-                """SELECT * FROM alerts WHERE listing_id = ? AND alert_type = ?
+                """SELECT * FROM alerts WHERE listing_id = ? AND alert_type = ? AND status = 'sent'
                    ORDER BY sent_at DESC, id DESC LIMIT 1""",
                 (listing_id, alert_type),
             ).fetchone()
@@ -610,19 +801,37 @@ class Database:
     ) -> Alert:
         with self.connection() as connection:
             cursor = connection.execute(
-                """INSERT INTO alerts (listing_id, alert_type, price, target_price, sent_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (listing_id, alert_type, str(price), str(target_price), utc_now()),
+                """INSERT INTO alerts (listing_id, alert_type, price, target_price, sent_at, status)
+                   VALUES (?, ?, ?, ?, '', 'pending')
+                   ON CONFLICT(listing_id, alert_type) WHERE status = 'pending'
+                   DO UPDATE SET price = excluded.price, target_price = excluded.target_price
+                   RETURNING *""",
+                (listing_id, alert_type, str(price), str(target_price)),
             )
-            alert_id = int(cursor.lastrowid)
-        with self.connection() as connection:
-            row = connection.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+            row = cursor.fetchone()
         return self._alert(row)
 
-    def delete_alert(self, alert_id: int) -> None:
-        """Compensate a failed delivery; price history remains append-only."""
+    def pending_alert(self, listing_id: int, alert_type: str) -> Alert | None:
         with self.connection() as connection:
-            connection.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
+            row = connection.execute(
+                """SELECT * FROM alerts WHERE listing_id = ? AND alert_type = ?
+                   AND status = 'pending' ORDER BY id DESC LIMIT 1""",
+                (listing_id, alert_type),
+            ).fetchone()
+        return None if row is None else self._alert(row)
+
+    def mark_alert_sent(self, alert_id: int) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE alerts SET status = 'sent', sent_at = ? WHERE id = ?",
+                (utc_now(), alert_id),
+            )
+
+    def cancel_pending_alert(self, listing_id: int) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "DELETE FROM alerts WHERE listing_id = ? AND status = 'pending'", (listing_id,),
+            )
 
     @staticmethod
     def _decimal(value: Decimal | None) -> str | None:
@@ -639,6 +848,7 @@ class Database:
             as_datetime(row["updated_at"]),
             row["identity_json"],
             row["source_query"],
+            row["monitoring_mode"],
         )
 
     @staticmethod
@@ -657,6 +867,9 @@ class Database:
             row["discovery_source"],
             row["validation_status"],
             row["uncertainty"],
+            as_datetime(row["last_checked_at"]) if row["last_checked_at"] else None,
+            as_datetime(row["last_success_at"]) if row["last_success_at"] else None,
+            row["last_error"],
         )
 
     @staticmethod
@@ -686,5 +899,6 @@ class Database:
             row["alert_type"],
             Decimal(row["price"]),
             Decimal(row["target_price"]),
-            as_datetime(row["sent_at"]),
+            as_datetime(row["sent_at"]) if row["sent_at"] else None,
+            row["status"],
         )

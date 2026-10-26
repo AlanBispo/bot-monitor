@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 
 import httpx
@@ -112,32 +113,41 @@ async def test_mandatory_acceptance_scenario_is_deterministic_and_direct_monitor
         source_timeout=1, max_candidates=20,
     )
 
-    outcome = await orchestrator.search(query)
-
-    assert outcome.status == "partial"
-    assert outcome.source_coverage["sources"]["web-timeout"]["status"] == "failed"
-    assert [result.offer.url for result in outcome.results].count(amazon_url) == 1
-    assert outcome.results[0].pricing.effective_price == Decimal("110.00")
-    assert outcome.results[1].pricing.effective_price == Decimal("115.00")
-    unknown = next(result for result in outcome.results if result.offer.url == unknown_url)
-    assert unknown.decision.status == "matched"
-    assert unknown.pricing.effective_price is None
-    wrong = next(result for result in outcome.results if result.offer.url == wrong_url)
-    assert wrong.decision.status == "rejected"
-    assert wrong.decision.reason == "hard_mismatch_capacity"
-
     db = Database(tmp_path / "prices.db")
     db.initialize()
-    session = db.create_search_session(
-        123, query.original_text, query.to_json(), outcome.status, outcome.source_coverage,
-        outcome.entries(),
+    bot = TelegramBot(db, {"amazon": amazon, "mercadolivre": mercado, "magalu": magalu},
+                      123, orchestrator)
+    search_update = FakeUpdate()
+    await bot.search(
+        search_update, type("Context", (), {"args": query.original_text.split()})(),
     )
+    rendered = search_update.effective_message.replies[0]
+    assert "web-timeout" in rendered and "parcial" in rendered
+    assert "frete desconhecido" in rendered
+    session = db.get_search_session(rendered.split()[1], chat_id=123)
+    assert session.status == "partial"
+    coverage = json.loads(session.source_coverage_json)
+    assert coverage["sources"]["web-timeout"]["status"] == "failed"
+    entries = [db.get_search_entry(session.id, f"R{index}", chat_id=123)
+               for index in range(1, 5)]
+    assert [entry.url for entry in entries].count(amazon_url) == 1
+    assert entries[0].effective_price == Decimal("110.00")
+    assert entries[1].effective_price == Decimal("115.00")
+    unknown = next(entry for entry in entries if entry.url == unknown_url)
+    assert unknown.match_status == "matched"
+    assert unknown.effective_price is None
+    wrong = next(entry for entry in entries if entry.url == wrong_url)
+    assert wrong.match_status == "rejected"
+    assert wrong.match_reason == "hard_mismatch_capacity"
     selected = db.get_search_entry(session.id, "R1", chat_id=123)
     assert selected.url == amazon_url
-    product, listing = db.register_product_listing(
-        selected.title, Decimal("110"), selected.store, selected.url, selected.title,
-        canonical_url=selected.canonical_url, discovery_source=selected.discovery_source,
+    selected_update = FakeUpdate()
+    await bot.select(
+        selected_update, type("Context", (), {"args": [session.id, "R1", "110"]})(),
     )
+    assert "confirmado" in selected_update.effective_message.replies[0]
+    product = db.list_products()[0]
+    listing = db.list_listings()[0]
     amazon.calls.clear()
     monitor = Monitor(db, {"amazon": amazon}, AlertEngine(db))
     messages = []
