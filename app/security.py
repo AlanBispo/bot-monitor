@@ -13,8 +13,8 @@ class UnsafeURL(ValueError):
 
 def validate_url(url: str, allowed_domains: set[str] | None = None) -> str:
     """Return a normalized URL only when it is safe enough to fetch."""
-    if not isinstance(url, str) or len(url) > 2048:
-        raise UnsafeURL("URL ausente ou longa demais")
+    if len(url) > 2048:
+        raise UnsafeURL("URL longa demais")
     parsed = urlparse(url.strip())
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         raise UnsafeURL("somente URLs http e https são aceitas")

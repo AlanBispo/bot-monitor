@@ -2,7 +2,7 @@ param([switch]$StartNow)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$runnerPath = Join-Path $PSScriptRoot 'start-monitor.ps1'
+$runnerPath = Join-Path $PSScriptRoot 'start-monitor-hidden.js'
 if (-not (Test-Path -LiteralPath (Join-Path $projectRoot '.venv\Scripts\python.exe'))) {
     throw 'Instale o ambiente Python do projeto antes de registrar a tarefa.'
 }
@@ -14,8 +14,8 @@ if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
     throw 'A tarefa PriceMonitorBot ja existe. Remova-a explicitamente antes de reinstalar.'
 }
 $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-$action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$runnerPath`" -Background" `
+$action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" `
+    -Argument "//B //E:JScript `"$runnerPath`"" `
     -WorkingDirectory $projectRoot
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
 $trigger.Delay = 'PT30S'

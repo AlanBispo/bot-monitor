@@ -14,9 +14,6 @@ class StoreSearchResult:
     title: str
     url: str
     product_price: Decimal | None
-    seller: str | None = None
-    source: str | None = None
-    snippet_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -53,6 +50,9 @@ class Product:
     source_query: str | None = None
     # The legacy target_price column stores the captured reference in price_drop mode.
     monitoring_mode: Literal["target", "price_drop"] = "target"
+    # None means automatic: shorter interval near the target, default interval otherwise.
+    check_interval_minutes: int | None = None
+    removed: bool = False
 
 
 @dataclass(frozen=True)
@@ -99,6 +99,16 @@ class Alert:
     target_price: Decimal
     sent_at: datetime | None
     status: str = "sent"
+
+
+@dataclass(frozen=True)
+class StoreHealth:
+    store: str
+    consecutive_failures: int
+    last_error: str | None
+    last_failure_at: datetime | None
+    last_success_at: datetime | None
+    notified: bool
 
 
 @dataclass(frozen=True)

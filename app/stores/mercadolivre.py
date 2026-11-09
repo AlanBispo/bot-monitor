@@ -9,9 +9,14 @@ from bs4 import BeautifulSoup
 from ..models import StoreOffer, StoreSearchResult
 from ..pricing import InvalidMoney, parse_money
 from ..security import UnsafeURL, validate_url
-from .base import StoreParseError, validate_search_page
+from .base import StoreParseError, StoreUnavailable, validate_search_page
 from .http import HTTPStoreAdapter
-from .structured import StructuredDataMissing, _availability, _visible_price, parse_jsonld_offer
+from .structured import (
+    StructuredDataMissing,
+    _visible_price,
+    parse_jsonld_offer,
+    parse_microdata_offer,
+)
 
 
 def parse_search_results(html: str, base_url: str = "https://lista.mercadolivre.com.br"):
@@ -33,7 +38,6 @@ def parse_search_results(html: str, base_url: str = "https://lista.mercadolivre.
                 title.get_text(" ", strip=True),
                 url,
                 _visible_price(item.get_text(" ", strip=True)),
-                source="mercadolivre",
             )
         )
     return validate_search_page(html, results)
@@ -44,6 +48,15 @@ def parse_offer(html: str, url: str) -> StoreOffer:
         return parse_jsonld_offer(html, url, "mercadolivre")
     except StructuredDataMissing:
         soup = BeautifulSoup(html, "html.parser")
+        visible_text = " ".join(soup.get_text(" ", strip=True).casefold().split())
+        if any(marker in visible_text for marker in (
+            "para continuar, acesse sua conta", "entre na sua conta para continuar",
+        )):
+            raise StoreUnavailable(
+                "Mercado Livre exigiu login e não disponibilizou o preço ao monitor. "
+                "Tente um link público direto do anúncio; se o login continuar sendo exigido, "
+                "essa oferta não pode ser monitorada nesta versão."
+            ) from None
         title_node = soup.select_one("h1.ui-pdp-title, h1[data-testid='heading-product-title']")
         price_node = soup.select_one(".ui-pdp-price__second-line .andes-money-amount__fraction")
         if not title_node or not price_node:
@@ -56,26 +69,7 @@ def parse_offer(html: str, url: str) -> StoreOffer:
             price = parse_money(raw)
         except InvalidMoney as exc:
             raise StoreParseError("preço Mercado Livre inválido") from exc
-        availability_node = soup.select_one("meta[itemprop='availability']")
-        available = _availability(
-            availability_node.get("content") if availability_node else None
-        )
-        if available is None:
-            raise StoreParseError("disponibilidade Mercado Livre desconhecida") from None
-        currency = soup.select_one("meta[itemprop='priceCurrency']")
-        if currency is None or currency.get("content", "").upper() != "BRL":
-            raise StoreParseError("moeda Mercado Livre não comprovada como BRL") from None
-        if available is False:
-            return StoreOffer(
-                "mercadolivre",
-                title_node.get_text(" ", strip=True),
-                url,
-                None,
-                None,
-                available=False,
-                observation_status="unavailable",
-            )
-        return StoreOffer("mercadolivre", title_node.get_text(" ", strip=True), url, price, None)
+        return parse_microdata_offer(soup, url, "mercadolivre", title_node, price)
 
 
 class MercadoLivreAdapter(HTTPStoreAdapter):
@@ -83,8 +77,6 @@ class MercadoLivreAdapter(HTTPStoreAdapter):
     domains = {"mercadolivre.com.br", "mercadolibre.com.br"}
 
     async def search(self, query: str):
-        if not query or len(query) > 200:
-            raise StoreParseError("termo de busca inválido")
         html = await self._get(f"https://lista.mercadolivre.com.br/{quote_plus(query)}")
         return parse_search_results(html)
 

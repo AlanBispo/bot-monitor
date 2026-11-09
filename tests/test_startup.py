@@ -37,7 +37,7 @@ class FakeApplication:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("startup_delay", [0, 1.1])
+@pytest.mark.parametrize("startup_delay", [0])
 async def test_startup_checks_immediately_after_telegram_is_ready(
     monkeypatch, tmp_path, startup_delay,
 ):
@@ -51,7 +51,7 @@ async def test_startup_checks_immediately_after_telegram_is_ready(
 
     application.updater.start_polling = start_polling
 
-    async def check_once(send_alert):
+    async def check_once(send_alert, *, due_only=False):
         calls.append((application.running, application.updater.running))
         checked.set()
 

@@ -14,7 +14,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
-from .identity import explicit_attributes
 from .models import (
     Alert,
     HistoryStats,
@@ -23,11 +22,14 @@ from .models import (
     Product,
     SearchEntry,
     SearchSession,
+    StoreHealth,
 )
 from .pricing import PricingResult, parse_money
 from .urls import listing_key
 
 LOGGER = logging.getLogger(__name__)
+MIN_CHECK_INTERVAL = 5
+MAX_CHECK_INTERVAL = 1440
 
 
 class DatabaseError(RuntimeError):
@@ -61,8 +63,8 @@ class Database:
         search_session_max_age_hours: int = 24,
     ):
         self.path = Path(path)
-        self.search_session_max = max(1, search_session_max)
-        self.search_session_max_age_hours = max(1, search_session_max_age_hours)
+        self.search_session_max = search_session_max
+        self.search_session_max_age_hours = search_session_max_age_hours
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -93,7 +95,10 @@ class Database:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     identity_json TEXT,
-                    source_query TEXT
+                    source_query TEXT,
+                    monitoring_mode TEXT NOT NULL DEFAULT 'target',
+                    check_interval_minutes INTEGER,
+                    removed_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS listings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,7 +113,11 @@ class Database:
                     canonical_url TEXT,
                     discovery_source TEXT,
                     validation_status TEXT NOT NULL DEFAULT 'confirmed',
-                    uncertainty TEXT
+                    uncertainty TEXT,
+                    identity_key TEXT,
+                    last_checked_at TEXT,
+                    last_success_at TEXT,
+                    last_error TEXT
                 );
                 CREATE TABLE IF NOT EXISTS price_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,7 +138,8 @@ class Database:
                     alert_type TEXT NOT NULL,
                     price TEXT NOT NULL,
                     target_price TEXT NOT NULL,
-                    sent_at TEXT NOT NULL
+                    sent_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'sent'
                 );
                 CREATE INDEX IF NOT EXISTS idx_history_listing_time
                     ON price_history(listing_id, captured_at);
@@ -166,125 +176,19 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_search_sessions_chat_time
                     ON search_sessions(chat_id, started_at);
+                CREATE TABLE IF NOT EXISTS store_health (
+                    store TEXT PRIMARY KEY,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    last_failure_at TEXT,
+                    last_success_at TEXT,
+                    notified INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_identity ON listings(identity_key);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_alert
+                    ON alerts(listing_id, alert_type) WHERE status = 'pending';
                 """
             )
-            self._ensure_column(connection, "products", "identity_json", "TEXT")
-            self._ensure_column(connection, "products", "source_query", "TEXT")
-            self._ensure_column(
-                connection, "products", "monitoring_mode", "TEXT NOT NULL DEFAULT 'target'"
-            )
-            self._ensure_column(connection, "listings", "canonical_url", "TEXT")
-            self._ensure_column(connection, "listings", "discovery_source", "TEXT")
-            self._ensure_column(
-                connection, "listings", "validation_status", "TEXT NOT NULL DEFAULT 'confirmed'"
-            )
-            self._ensure_column(connection, "listings", "uncertainty", "TEXT")
-            for column, definition in {
-                "identity_key": "TEXT", "last_checked_at": "TEXT", "last_success_at": "TEXT",
-                "last_error": "TEXT",
-            }.items():
-                self._ensure_column(connection, "listings", column, definition)
-            self._ensure_column(connection, "alerts", "status", "TEXT NOT NULL DEFAULT 'sent'")
-            connection.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_identity ON listings(identity_key)"
-            )
-            connection.execute(
-                """DELETE FROM alerts WHERE status IN ('pending', 'failed') AND id NOT IN
-                   (SELECT MAX(id) FROM alerts WHERE status IN ('pending', 'failed')
-                    GROUP BY listing_id, alert_type)"""
-            )
-            connection.execute("UPDATE alerts SET status = 'pending' WHERE status = 'failed'")
-            connection.execute(
-                """CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_alert
-                   ON alerts(listing_id, alert_type) WHERE status = 'pending'"""
-            )
-            self._migrate_listing_identities(connection)
-            legacy = connection.execute(
-                """SELECT p.id, l.title FROM products p JOIN listings l ON l.product_id = p.id
-                   WHERE p.identity_json IS NULL AND l.validation_status = 'confirmed'
-                   ORDER BY l.id"""
-            ).fetchall()
-            seen_products: set[int] = set()
-            for row in legacy:
-                if row["id"] in seen_products:
-                    continue
-                seen_products.add(row["id"])
-                connection.execute(
-                    "UPDATE products SET identity_json = ? WHERE id = ?",
-                    (json.dumps({"attributes": explicit_attributes(row["title"]),
-                                 "confirmed_title": row["title"],
-                                 "registration_source": "legacy_listing"},
-                                ensure_ascii=False, sort_keys=True), row["id"]),
-                )
-
-    @staticmethod
-    def _migrate_listing_identities(connection: sqlite3.Connection) -> None:
-        rows = connection.execute(
-            """SELECT l.*, p.active AS product_active FROM listings l
-               JOIN products p ON p.id = l.product_id
-               ORDER BY p.active DESC, l.active DESC, l.id"""
-        ).fetchall()
-        groups = defaultdict(list)
-        for row in rows:
-            groups[listing_key(row["store"], row["url"], row["canonical_url"])].append(row)
-        for key, listings in groups.items():
-            winner = listings[0]
-            connection.execute("UPDATE listings SET identity_key = NULL WHERE identity_key = ?",
-                               (key,))
-            connection.execute("UPDATE listings SET identity_key = ? WHERE id = ?",
-                               (key, winner["id"]))
-            # Recover active products disabled by the previous duplicate migration.
-            if winner["product_active"] and winner["validation_status"] == "duplicate":
-                connection.execute(
-                    """UPDATE listings SET active = 1, validation_status = 'confirmed',
-                       uncertainty = NULL WHERE id = ?""", (winner["id"],),
-                )
-            for row in listings[1:]:
-                if row["product_active"] and row["active"] and (
-                    row["product_id"] != winner["product_id"]
-                ):
-                    LOGGER.warning("oferta duplicada nos produtos %s e %s; cadastros preservados",
-                                   winner["product_id"], row["product_id"])
-                    connection.execute(
-                        "UPDATE listings SET uncertainty = 'duplicate_conflict' WHERE id = ?",
-                        (row["id"],),
-                    )
-                else:
-                    connection.execute(
-                        """UPDATE listings SET active = 0, validation_status = 'duplicate',
-                           uncertainty = ? WHERE id = ?""",
-                        (f"duplicate_of:{winner['id']}", row["id"]),
-                    )
-
-    @staticmethod
-    def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str):
-        columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
-        if column not in columns:
-            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-
-    def add_product(
-        self,
-        name: str,
-        target_price: Decimal,
-        *,
-        identity_json: str | None = None,
-        source_query: str | None = None,
-        monitoring_mode: str = "target",
-    ) -> Product:
-        if monitoring_mode not in {"target", "price_drop"}:
-            raise ValueError("modo de monitoramento inválido")
-        now = utc_now()
-        with self.connection() as connection:
-            cursor = connection.execute(
-                """INSERT INTO products
-                   (name, target_price, created_at, updated_at, identity_json, source_query,
-                    monitoring_mode)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (name.strip(), str(target_price), now, now, identity_json, source_query,
-                 monitoring_mode),
-            )
-            product_id = int(cursor.lastrowid)
-        return self.get_product(product_id)
 
     def register_product_listing(
         self,
@@ -304,8 +208,6 @@ class Database:
         initial_pricing: PricingResult | None = None,
     ) -> tuple[Product, Listing]:
         """Create a product, first listing and optional initial observation atomically."""
-        if monitoring_mode not in {"target", "price_drop"}:
-            raise ValueError("modo de monitoramento inválido")
         now = utc_now()
         try:
             with self.connection() as connection:
@@ -364,11 +266,18 @@ class Database:
             raise KeyError(f"produto {product_id} não encontrado")
         return self._product(row)
 
-    def list_products(self, active_only: bool = False) -> list[Product]:
+    def list_products(
+        self, active_only: bool = False, *, include_removed: bool = True
+    ) -> list[Product]:
         query = "SELECT * FROM products"
         params: tuple[object, ...] = ()
+        clauses = []
         if active_only:
-            query += " WHERE active = 1"
+            clauses.append("active = 1")
+        if not include_removed:
+            clauses.append("removed_at IS NULL")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY id"
         with self.connection() as connection:
             rows = connection.execute(query, params).fetchall()
@@ -395,6 +304,43 @@ class Database:
             )
         return True
 
+    def remove_product(self, product_id: int) -> bool:
+        """Hide a product from listings and stop monitoring; history stays for /exportar."""
+        now = utc_now()
+        with self.connection() as connection:
+            cursor = connection.execute(
+                """UPDATE products SET active = 0, removed_at = ?, updated_at = ?
+                   WHERE id = ? AND removed_at IS NULL""",
+                (now, now, product_id),
+            )
+            if cursor.rowcount == 0:
+                return False
+            connection.execute(
+                "UPDATE listings SET active = 0, updated_at = ? WHERE product_id = ?",
+                (now, product_id),
+            )
+            connection.execute(
+                """DELETE FROM alerts WHERE status IN ('pending', 'queued')
+                   AND listing_id IN (SELECT id FROM listings WHERE product_id = ?)""",
+                (product_id,),
+            )
+        return True
+
+    def set_check_interval(self, product_id: int, minutes: int | None) -> Product:
+        if minutes is not None and not MIN_CHECK_INTERVAL <= minutes <= MAX_CHECK_INTERVAL:
+            raise ValueError(
+                f"intervalo deve ficar entre {MIN_CHECK_INTERVAL} e {MAX_CHECK_INTERVAL} minutos"
+            )
+        with self.connection() as connection:
+            cursor = connection.execute(
+                """UPDATE products SET check_interval_minutes = ?, updated_at = ?
+                   WHERE id = ?""",
+                (minutes, utc_now(), product_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError("produto não encontrado")
+        return self.get_product(product_id)
+
     def update_target(self, product_id: int, target: Decimal) -> Product:
         target = parse_money(target)
         with self.connection() as connection:
@@ -416,7 +362,7 @@ class Database:
         self.get_product(product_id)
         with self.connection() as connection:
             connection.execute(
-                "UPDATE products SET active = 1, updated_at = ? WHERE id = ?",
+                "UPDATE products SET active = 1, removed_at = NULL, updated_at = ? WHERE id = ?",
                 (utc_now(), product_id),
             )
             connection.execute(
@@ -472,11 +418,6 @@ class Database:
             raise KeyError(f"listing {listing_id} não encontrado")
         return self._listing(row)
 
-    def get_listing_by_url(self, url: str) -> Listing | None:
-        with self.connection() as connection:
-            row = connection.execute("SELECT * FROM listings WHERE url = ?", (url,)).fetchone()
-        return None if row is None else self._listing(row)
-
     def list_listings(
         self, active_only: bool = True, *, confirmed_only: bool = False
     ) -> list[Listing]:
@@ -492,13 +433,6 @@ class Database:
         with self.connection() as connection:
             rows = connection.execute(query).fetchall()
         return [self._listing(row) for row in rows]
-
-    def deactivate_listing(self, listing_id: int) -> None:
-        with self.connection() as connection:
-            connection.execute(
-                "UPDATE listings SET active = 0, updated_at = ? WHERE id = ?",
-                (utc_now(), listing_id),
-            )
 
     def record_check(self, listing_id: int, *, error: str | None = None) -> None:
         now = utc_now()
@@ -638,14 +572,8 @@ class Database:
             row["match_status"], row["match_reason"], row["uncertainty"], row["discovery_source"],
         )
 
-    def cleanup_search_sessions(
-        self, *, max_sessions: int | None = None, max_age_hours: int | None = None
-    ) -> None:
-        max_sessions = self.search_session_max if max_sessions is None else max(1, max_sessions)
-        max_age_hours = (
-            self.search_session_max_age_hours if max_age_hours is None else max(1, max_age_hours)
-        )
-        cutoff = (datetime.now(UTC) - timedelta(hours=max_age_hours)).isoformat(
+    def cleanup_search_sessions(self) -> None:
+        cutoff = (datetime.now(UTC) - timedelta(hours=self.search_session_max_age_hours)).isoformat(
             timespec="microseconds"
         )
         with self.connection() as connection:
@@ -656,7 +584,7 @@ class Database:
             connection.execute(
                 """DELETE FROM search_sessions WHERE id NOT IN
                    (SELECT id FROM search_sessions ORDER BY started_at DESC LIMIT ?)""",
-                (max_sessions,),
+                (self.search_session_max,),
             )
 
     def history(self, listing_id: int, since: datetime | None = None) -> list[PriceSnapshot]:
@@ -703,13 +631,6 @@ class Database:
         for rows in grouped.values():
             rows.sort(key=lambda row: (row.captured_at, row.id))
         return grouped
-
-    def history_stats(self, listing_id: int, since: datetime | None = None) -> HistoryStats:
-        stats = self._stats(self.history(listing_id, since))
-        listing = self.get_listing(listing_id)
-        if listing.last_error or not listing.active:
-            return replace(stats, current_price=None, current_uncertain=True)
-        return stats
 
     def product_history_stats(self, product_id: int, since: datetime | None = None) -> HistoryStats:
         self.get_product(product_id)
@@ -787,14 +708,94 @@ class Database:
         )
         return (min(current_prices) if current_prices else None, uncertain)
 
-    def last_alert(self, listing_id: int, alert_type: str) -> Alert | None:
+    def last_alert(
+        self, listing_id: int, alert_type: str, *, include_queued: bool = False
+    ) -> Alert | None:
         with self.connection() as connection:
             row = connection.execute(
-                """SELECT * FROM alerts WHERE listing_id = ? AND alert_type = ? AND status = 'sent'
+                """SELECT * FROM alerts WHERE listing_id = ? AND alert_type = ?
+                   AND (status = 'sent' OR (? AND status = 'queued'))
                    ORDER BY sent_at DESC, id DESC LIMIT 1""",
-                (listing_id, alert_type),
+                (listing_id, alert_type, int(include_queued)),
             ).fetchone()
         return None if row is None else self._alert(row)
+
+    def add_queued_alert(
+        self, listing_id: int, alert_type: str, price: Decimal, reference: Decimal
+    ) -> Alert:
+        """Record an event for the daily summary; it counts for de-duplication immediately."""
+        with self.connection() as connection:
+            row = connection.execute(
+                """INSERT INTO alerts (listing_id, alert_type, price, target_price, sent_at, status)
+                   VALUES (?, ?, ?, ?, ?, 'queued') RETURNING *""",
+                (listing_id, alert_type, str(price), str(reference), utc_now()),
+            ).fetchone()
+        return self._alert(row)
+
+    def queued_alerts(self) -> list[Alert]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM alerts WHERE status = 'queued' ORDER BY id"
+            ).fetchall()
+        return [self._alert(row) for row in rows]
+
+    def mark_alerts_sent(self, alert_ids: list[int]) -> None:
+        with self.connection() as connection:
+            connection.executemany(
+                "UPDATE alerts SET status = 'sent' WHERE id = ? AND status = 'queued'",
+                [(alert_id,) for alert_id in alert_ids],
+            )
+
+    def store_health(self) -> list[StoreHealth]:
+        with self.connection() as connection:
+            rows = connection.execute("SELECT * FROM store_health ORDER BY store").fetchall()
+        return [self._store_health(row) for row in rows]
+
+    def record_store_result(
+        self, store: str, *, error: str | None, threshold: int
+    ) -> str | None:
+        """Track consecutive failed cycles; return 'failing' or 'recovered' once per transition."""
+        now = utc_now()
+        with self.connection() as connection:
+            connection.execute(
+                "INSERT INTO store_health (store) VALUES (?) ON CONFLICT(store) DO NOTHING",
+                (store,),
+            )
+            row = connection.execute(
+                "SELECT * FROM store_health WHERE store = ?", (store,)
+            ).fetchone()
+            if error is None:
+                connection.execute(
+                    """UPDATE store_health SET consecutive_failures = 0, last_success_at = ?,
+                       notified = 0 WHERE store = ?""",
+                    (now, store),
+                )
+                return "recovered" if row["notified"] else None
+            failures = int(row["consecutive_failures"]) + 1
+            notify = failures >= max(1, threshold) and not row["notified"]
+            connection.execute(
+                """UPDATE store_health SET consecutive_failures = ?, last_error = ?,
+                   last_failure_at = ?, notified = ? WHERE store = ?""",
+                (failures, error, now, int(bool(row["notified"]) or notify), store),
+            )
+            return "failing" if notify else None
+
+    def export_rows(self, product_id: int | None = None) -> list[sqlite3.Row]:
+        query = """SELECT p.id AS product_id, p.name AS product_name, l.id AS listing_id,
+                          l.store, l.url, h.captured_at, h.available, h.product_price,
+                          h.shipping_price, h.confirmed_discount, h.possible_discount,
+                          h.effective_price, h.possible_effective_price, h.seller
+                   FROM price_history h
+                   JOIN listings l ON l.id = h.listing_id
+                   JOIN products p ON p.id = l.product_id"""
+        params: tuple[object, ...] = ()
+        if product_id is not None:
+            self.get_product(product_id)
+            query += " WHERE p.id = ?"
+            params = (product_id,)
+        query += " ORDER BY p.id, l.id, h.captured_at, h.id"
+        with self.connection() as connection:
+            return connection.execute(query, params).fetchall()
 
     def add_alert(
         self, listing_id: int, alert_type: str, price: Decimal, target_price: Decimal
@@ -849,6 +850,18 @@ class Database:
             row["identity_json"],
             row["source_query"],
             row["monitoring_mode"],
+            row["check_interval_minutes"],
+            row["removed_at"] is not None,
+        )
+
+    @staticmethod
+    def _store_health(row: sqlite3.Row) -> StoreHealth:
+        def moment(key: str):
+            return as_datetime(row[key]) if row[key] else None
+
+        return StoreHealth(
+            row["store"], int(row["consecutive_failures"]), row["last_error"],
+            moment("last_failure_at"), moment("last_success_at"), bool(row["notified"]),
         )
 
     @staticmethod

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
+from decimal import Decimal
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
@@ -12,6 +13,12 @@ from bs4 import BeautifulSoup
 from ..models import StoreOffer
 from ..pricing import InvalidMoney, parse_money
 from .base import StoreParseError
+
+CONDITIONAL_PRICE_KEYS = (
+    "validForMemberTier", "eligibleTransactionVolume", "eligibleQuantity",
+    "eligibleCustomerType", "eligibleRegion", "ineligibleRegion",
+    "billingDuration", "billingIncrement", "referenceQuantity",
+)
 
 
 class StructuredDataMissing(StoreParseError):
@@ -65,9 +72,8 @@ def _first_price(offers) -> tuple[str | None, str | None]:
             price = offer.get("lowPrice")
         if price is None:
             return None, None
-        if price is not None:
-            currency = offer.get("priceCurrency") or offer.get("currency")
-            found.append((str(price), currency if isinstance(currency, str) else None))
+        currency = offer.get("priceCurrency") or offer.get("currency")
+        found.append((str(price), currency if isinstance(currency, str) else None))
     if (
         not found
         or len({item[0] for item in found}) > 1
@@ -126,21 +132,17 @@ def parse_jsonld_offer(html: str, url: str, store: str) -> StoreOffer:
         )
     if statuses != {True}:
         raise StoreParseError("disponibilidade estruturada ambígua")
-    for item in [product, *values]:
-        if any(item.get(key) for key in (
-            "validForMemberTier", "eligibleTransactionVolume", "eligibleQuantity",
-            "eligibleCustomerType", "eligibleRegion", "ineligibleRegion",
-        )):
-            raise StoreParseError("preço condicionado a elegibilidade não comprovada")
-    for item in values:
-        specs = item.get("priceSpecification", [])
-        specs = specs if isinstance(specs, list) else [specs]
-        for spec in specs:
-            if not isinstance(spec, dict) or any(spec.get(key) for key in (
-                "validForMemberTier", "eligibleTransactionVolume", "eligibleQuantity",
-                "billingDuration", "billingIncrement", "referenceQuantity",
-            )):
-                raise StoreParseError("especificação de preço condicionada ou ambígua")
+    specs = [
+        spec for item in values
+        for spec in (item.get("priceSpecification") if isinstance(
+            item.get("priceSpecification"), list
+        ) else [item.get("priceSpecification") or {}])
+    ]
+    if any(
+        isinstance(item, dict) and any(item.get(key) for key in CONDITIONAL_PRICE_KEYS)
+        for item in [product, *values, *specs]
+    ):
+        raise StoreParseError("preço condicionado a elegibilidade não comprovada")
     raw_price, currency = _first_price(offer_data)
     if not raw_price:
         raise StoreParseError("preço estruturado ausente")
@@ -158,28 +160,20 @@ def parse_jsonld_offer(html: str, url: str, store: str) -> StoreOffer:
         if isinstance(details, dict) and details.get("doesNotShip"):
             raise StoreParseError("oferta sem entrega disponível")
         rate = details.get("shippingRate") if isinstance(details, dict) else None
+        # A destination, tier or range makes the rate conditional, so it stays unknown.
         if (
-            isinstance(details, dict)
-            and not details.get("shippingDestination")
+            isinstance(details, dict) and isinstance(rate, dict)
             and not any(details.get(key) for key in (
-                "validForMemberTier", "shippingSettingsLink", "shippingLabel",
-                "eligibleTransactionVolume",
+                "shippingDestination", "validForMemberTier", "shippingLabel",
             ))
-            and isinstance(rate, dict)
-            and not any(rate.get(key) for key in (
-                "validForMemberTier", "eligibleTransactionVolume", "minValue", "maxValue",
-            ))
+            and not any(rate.get(key) for key in ("validForMemberTier", "minValue", "maxValue"))
+            and str(rate.get("currency") or rate.get("priceCurrency") or currency).upper() == "BRL"
+            and rate.get("value") is not None
         ):
-            shipping_currency = rate.get("currency") or rate.get("priceCurrency") or currency
-            if (
-                rate.get("value") is not None
-                and isinstance(shipping_currency, str)
-                and shipping_currency.upper() in {"BRL", "R$", "REAL", "REAIS"}
-            ):
-                try:
-                    shipping = parse_money(rate["value"], allow_zero=True)
-                except InvalidMoney:
-                    shipping = None
+            try:
+                shipping = parse_money(rate["value"], allow_zero=True)
+            except InvalidMoney:
+                shipping = None
     canonical = product.get("url") if isinstance(product.get("url"), str) else None
     seller_data = values[0].get("seller") if len(values) == 1 else None
     seller = seller_data.get("name") if isinstance(seller_data, dict) else seller_data
@@ -190,6 +184,25 @@ def parse_jsonld_offer(html: str, url: str, store: str) -> StoreOffer:
         attributes=attributes,
         canonical_url=urljoin(url, canonical) if canonical else None,
     )
+
+
+def parse_microdata_offer(
+    soup: BeautifulSoup, url: str, store: str, title_node, price: Decimal,
+) -> StoreOffer:
+    """Fallback for pages without JSON-LD: availability and BRL must be stated in meta tags."""
+    availability = soup.select_one("meta[itemprop='availability']")
+    available = _availability(availability.get("content") if availability else None)
+    if available is None:
+        raise StoreParseError(f"disponibilidade {store} desconhecida")
+    currency = soup.select_one("meta[itemprop='priceCurrency']")
+    if currency is None or currency.get("content", "").upper() != "BRL":
+        raise StoreParseError(f"moeda {store} não comprovada como BRL")
+    title = title_node.get_text(" ", strip=True)
+    if available is False:
+        return StoreOffer(
+            store, title, url, None, None, available=False, observation_status="unavailable",
+        )
+    return StoreOffer(store, title, url, price, None)
 
 
 def _condition(value) -> str:

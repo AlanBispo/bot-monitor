@@ -11,7 +11,12 @@ from ..pricing import InvalidMoney, parse_money
 from ..security import UnsafeURL, validate_url
 from .base import StoreParseError, validate_search_page
 from .http import HTTPStoreAdapter
-from .structured import StructuredDataMissing, _availability, _visible_price, parse_jsonld_offer
+from .structured import (
+    StructuredDataMissing,
+    _visible_price,
+    parse_jsonld_offer,
+    parse_microdata_offer,
+)
 
 
 def parse_search_results(html: str, base_url: str = "https://www.magazineluiza.com.br"):
@@ -28,7 +33,7 @@ def parse_search_results(html: str, base_url: str = "https://www.magazineluiza.c
             continue
         price = _visible_price(link.get_text(" ", strip=True))
         if price is not None or "produto" in title.casefold():
-            results.append(StoreSearchResult("magalu", title, url, price, source="magalu"))
+            results.append(StoreSearchResult("magalu", title, url, price))
     return validate_search_page(html, list({item.url: item for item in results}.values()))
 
 
@@ -45,24 +50,7 @@ def parse_offer(html: str, url: str) -> StoreOffer:
             price = parse_money(price_node.get_text(" ", strip=True))
         except InvalidMoney as exc:
             raise StoreParseError("preço Magalu inválido") from exc
-        availability = soup.select_one("meta[itemprop='availability']")
-        available = _availability(availability.get("content") if availability else None)
-        if available is None:
-            raise StoreParseError("disponibilidade Magalu desconhecida") from None
-        currency = soup.select_one("meta[itemprop='priceCurrency']")
-        if currency is None or currency.get("content", "").upper() != "BRL":
-            raise StoreParseError("moeda Magalu não comprovada como BRL") from None
-        if available is False:
-            return StoreOffer(
-                "magalu",
-                title_node.get_text(" ", strip=True),
-                url,
-                None,
-                None,
-                available=False,
-                observation_status="unavailable",
-            )
-        return StoreOffer("magalu", title_node.get_text(" ", strip=True), url, price, None)
+        return parse_microdata_offer(soup, url, "magalu", title_node, price)
 
 
 class MagaluAdapter(HTTPStoreAdapter):
@@ -70,8 +58,6 @@ class MagaluAdapter(HTTPStoreAdapter):
     domains = {"magazineluiza.com.br", "magalu.com"}
 
     async def search(self, query: str):
-        if not query or len(query) > 200:
-            raise StoreParseError("termo de busca inválido")
         html = await self._get(f"https://www.magazineluiza.com.br/busca/{quote_plus(query)}/")
         return parse_search_results(html)
 

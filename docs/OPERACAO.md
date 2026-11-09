@@ -10,7 +10,7 @@
 
 Para URL direta, `/add URL` salva a referência atual e acompanha novos menores preços do produto, conforme o modo de queda disponível no projeto. `/add_alvo PREÇO URL` acompanha o preço efetivo com frete conhecido; o formato antigo `/add PREÇO URL` continua funcionando. `/anexar ID URL` inclui outra oferta equivalente no mesmo produto.
 
-Use `/lista` para os ativos e `/lista todos` para localizar também os inativos. `/remover ID` desativa o acompanhamento, `/reativar ID` retoma e `/alvo ID PREÇO` define o modo de preço-alvo. O histórico permanece preservado.
+Use `/lista` para os ativos e `/lista todos` para localizar também os pausados; os botões da lista pausam, retomam, alteram o alvo, mostram o gráfico e removem. `/pausar ID` interrompe o acompanhamento, `/remover ID` também esconde o produto da lista, `/reativar ID` desfaz os dois e `/alvo ID PREÇO` define o modo de preço-alvo. O histórico permanece preservado e disponível em `/exportar`.
 
 URLs da mesma oferta são deduplicadas, descartando rastreamento e preservando parâmetros de SKU, variante e vendedor. A migração prioriza cadastros ativos e preserva todos os IDs e históricos. Se a mesma oferta já estiver ativa em produtos diferentes, ambos são mantidos e o conflito aparece nos logs e em `/status`; use `/lista todos` e desative o cadastro que não quiser acompanhar. Faça backup antes de atualizar, conforme o README.
 
@@ -24,7 +24,7 @@ O monitor usa os atributos da oferta confirmada, além da busca original. Se uma
 
 ## Diagnóstico e recuperação
 
-`/check` informa coletas válidas, falhas, frete desconhecido, alertas enviados e falhas de envio. `/status` mostra a última tentativa, o último sucesso e o erro de cada oferta. Um preço anterior não é tratado como atual quando a consulta mais recente falhou.
+`/check` informa coletas válidas, falhas, frete desconhecido, alertas enviados e falhas de envio. `/status` mostra as lojas com falhas seguidas, além da última tentativa, do último sucesso e do erro de cada oferta. Uma loja em que todas as consultas falharam por `STORE_FAILURE_ALERT_CYCLES` ciclos gera um único aviso, e outro quando ela volta. Uma falha de correspondência do produto não conta como falha da loja. Um preço anterior não é tratado como atual quando a consulta mais recente falhou.
 
 Alertas de preço têm estado pendente distinto de enviado. Uma falha no Telegram ou cancelamento mantém o evento para o próximo ciclo, inclusive após reiniciar. A repetição exige uma observação nova que ainda satisfaça a condição. Oferta indisponível, frete desconhecido no modo alvo, desativação ou preço fora do alvo cancelam pendências incompatíveis.
 
@@ -56,5 +56,7 @@ search:
 O endpoint precisa ser público e resolver somente para IPs públicos; localhost, rede privada e metadados continuam bloqueados. Esta entrega não instala nem hospeda uma instância. SearXNG é opcional: com endpoint vazio, a aplicação usa somente as fontes nativas, sem dependência de serviço pago. `GENERIC_DISCOVERY_FORMAT=json` mantém compatibilidade com endpoints customizados de formato `{"results":[{"url":"https://loja.example/produto"}]}`.
 
 ## Limitações verificadas e piloto
+
+Links do Mercado Livre podem abrir normalmente no navegador autenticado e entregar ao monitor uma tela de login com HTTP 200. O cadastro informa explicitamente quando a loja exige acesso à conta; nenhum preço ou produto é inventado ou cadastrado a partir dessa tela. Na validação do link de catálogo `/p/MLB67821329`, com o anúncio `MLB4679319035`, remover os parâmetros do carrinho não eliminou a exigência de login. Um link público direto do anúncio pode ser tentado, mas não há garantia de acesso. Esta versão não usa cookies da conta nem autenticação de navegador.
 
 Na validação pública de 26/10/2026, a Amazon retornou dez candidatos e uma página de produto forneceu título, disponibilidade e preço; o frete ficou desconhecido. Mercado Livre entregou uma página pedindo login, e Magalu retornou 403. Esses estados são falhas de cobertura, e não resultados vazios válidos. Não foram usados login, checkout, CAPTCHA bypass ou Telegram real nessa validação. Não se afirma compatibilidade completa e permanente das três lojas.

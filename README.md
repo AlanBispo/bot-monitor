@@ -39,6 +39,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 2. Para descobrir seu `chat_id`, envie uma mensagem ao bot e consulte a API do Telegram (`https://api.telegram.org/bot<TOKEN>/getUpdates`) ou use um bot auxiliar confiável.
 3. Preencha `TELEGRAM_ALLOWED_CHAT_ID` com o número inteiro do seu chat privado.
 4. Ajuste `CHECK_INTERVAL_MINUTES` se necessário. O mínimo aplicado pelo programa é 5 minutos.
+5. Opcional: ajuste os alertas extras e o resumo diário (`PRICE_DROP_ALERT_PERCENT`, `DAILY_SUMMARY_ENABLED`, `DAILY_SUMMARY_TIME`), a frequência perto do alvo (`CHECK_INTERVAL_NEAR_TARGET_MINUTES`, `NEAR_TARGET_PERCENT`) e o aviso de loja com falha (`STORE_FAILURE_ALERT_CYCLES`). Os valores padrão estão no `.env.example`.
 
 Nunca compartilhe o `.env` nem cole o token em código ou logs.
 
@@ -50,7 +51,7 @@ O banco é criado automaticamente em `data/prices.db`, com histórico append-onl
 python main.py
 ```
 
-O mesmo processo mantém o polling do Telegram e o scheduler. Ao iniciar, verifica imediatamente os anúncios confirmados e ativos salvos no banco e repete a cada `CHECK_INTERVAL_MINUTES` (30 minutos por padrão). Não é necessário cadastrar os produtos novamente a cada reinicialização. Na primeira instalação, o banco estará vazio até cadastrar produtos pelo Telegram.
+O mesmo processo mantém o polling do Telegram e o scheduler. Ao iniciar, verifica imediatamente os anúncios confirmados e ativos salvos no banco. Depois, a cada 5 minutos, consulta apenas os anúncios cujo intervalo venceu: `CHECK_INTERVAL_MINUTES` (30 minutos por padrão), ou `CHECK_INTERVAL_NEAR_TARGET_MINUTES` (10) quando o último preço está até `NEAR_TARGET_PERCENT` (10%) acima do alvo. `/intervalo ID MINUTOS` fixa um intervalo para um produto (de 5 a 1440 minutos) e `/intervalo ID auto` volta ao automático. Não é necessário cadastrar os produtos novamente a cada reinicialização. Na primeira instalação, o banco estará vazio até cadastrar produtos pelo Telegram.
 
 ### Windows: execução manual e início automático
 
@@ -82,9 +83,9 @@ Unregister-ScheduledTask -TaskName PriceMonitorBot -Confirm:$false
 
 Os logs da execução em segundo plano ficam em `logs/monitor-AAAA-MM-DD.log` (data de início do processo). O computador precisa estar ligado, acordado e conectado; ao sair da conta ou desligar, o monitor para. O início antes do login não é configurado por estes scripts. Para WSL, use uma tarefa separada apontando para sua distribuição e ambiente Linux.
 
-`ENABLED_STORES` aceita uma lista separada por vírgulas entre `amazon`, `mercadolivre` e `magalu`. Os limites HTTP e de busca podem ser ajustados globalmente com `HTTP_TIMEOUT_SECONDS` e `SOURCE_TIMEOUT_SECONDS`, ou por loja com as variáveis `*_HTTP_TIMEOUT_SECONDS` e `*_SOURCE_TIMEOUT_SECONDS`. A descoberta web tem `WEB_DISCOVERY_TIMEOUT_SECONDS` e `WEB_DISCOVERY_SOURCE_TIMEOUT_SECONDS`. Os limites são aplicados por requisição/fonte; concorrência, bytes de resposta e número de candidatos também são limitados.
+`ENABLED_STORES` aceita uma lista separada por vírgulas entre `amazon`, `mercadolivre` e `magalu`. Os limites são `HTTP_TIMEOUT_SECONDS` (por requisição) e `SOURCE_TIMEOUT_SECONDS` (por fonte de busca); concorrência, bytes de resposta e número de candidatos também são limitados.
 
-As opções `AMAZON_BROWSER_AUTOMATION_ENABLED`, `MERCADOLIVRE_BROWSER_AUTOMATION_ENABLED` e `MAGALU_BROWSER_AUTOMATION_ENABLED` devem permanecer `false`: esta versão usa HTTP público e rejeita explicitamente `true`, pois não inclui automação de navegador. O monitor executa no máximo quatro verificações de listing em paralelo, sem sobrepor ciclos periódicos e manuais.
+Esta versão usa apenas HTTP público, sem automação de navegador. O monitor executa no máximo quatro verificações de listing em paralelo, sem sobrepor ciclos periódicos e manuais.
 
 Comandos:
 
@@ -99,11 +100,33 @@ Comandos:
 /lista
 /lista todos
 /check
-/historico ID_DO_PRODUTO
+/historico ID_DO_PRODUTO [DIAS]
+/exportar [ID_DO_PRODUTO]
+/resumo
+/intervalo ID_DO_PRODUTO MINUTOS|auto
+/pausar ID_DO_PRODUTO
 /remover ID_DO_PRODUTO
 /status
 /help
 ```
+
+`/lista` mostra botões por produto: ⏸ pausar, ▶ retomar (em `/lista todos`), 🎯 alterar o alvo (o bot pede o novo valor em seguida), 📈 gráfico e 🗑 remover (com confirmação). `/historico ID [DIAS]` envia o resumo em texto e um gráfico dos últimos 90 dias (ou do período informado). `/exportar` envia um CSV com todo o histórico, ou só de um produto, no formato do Excel em português (separador `;` e vírgula decimal).
+
+`/pausar` interrompe o monitoramento e mantém o produto em `/lista todos`. `/remover` também tira o produto da lista. Nos dois casos o histórico é preservado, continua em `/exportar` e `/reativar ID` desfaz.
+
+### Alertas extras e resumo diário
+
+Além do alerta principal (preço-alvo ou queda do produto), produtos com preço-alvo geram estes eventos. Eles comparam o preço do produto em cada anúncio, sem frete:
+
+- **menor preço do período:** abaixo de todos os preços dos últimos 90 dias. Só vale quando o histórico do anúncio cobre pelo menos 7 dias.
+- **queda percentual:** pelo menos `PRICE_DROP_ALERT_PERCENT`% (15% por padrão) abaixo do maior preço dos últimos 7 dias. Depois de um aviso, só uma nova queda do mesmo tamanho gera outro.
+- **voltou ao estoque:** o anúncio estava indisponível e voltou. Vale também para produtos cadastrados com `/add`.
+
+Com `DAILY_SUMMARY_ENABLED=true` (padrão), esses eventos são agrupados num resumo enviado em `DAILY_SUMMARY_TIME` (09:00). O resumo também traz o preço atual de cada produto, a variação em 24 horas e as lojas com falha. `/resumo` envia o resumo na hora. Com `false`, cada evento é enviado assim que ocorre; se o envio falhar, ele entra no próximo resumo. O alerta de preço-alvo é sempre imediato.
+
+### Aviso de loja com falha
+
+Se todas as consultas de uma loja falharem em `STORE_FAILURE_ALERT_CYCLES` ciclos seguidos (3 por padrão), o bot avisa uma única vez e avisa de novo quando a loja voltar a responder. `/status` mostra as lojas com falha e o último erro.
 
 `/buscar` é uma busca ampla de cadastro. A resposta usa identificadores curtos (`R1`, `R2`...) e informa cobertura, falhas parciais, variantes ambíguas e frete desconhecido. Use `/selecionar ID_DA_BUSCA R1 PREÇO_ALVO` ou o botão da resposta para confirmar uma oferta. O bot valida a página novamente antes de registrar. `/anexar ID_DO_PRODUTO URL` associa outra oferta ao mesmo produto.
 

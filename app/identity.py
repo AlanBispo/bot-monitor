@@ -112,7 +112,17 @@ def explicit_attributes(value: str) -> dict[str, str]:
         attrs["package_quantity"] = quantity.group("count") or quantity.group("units")
     tokens = set(re.findall(r"\b[a-z]+\b", text))
     single("condition", (CONDITIONS[token] for token in tokens & CONDITIONS.keys()))
-    single("color", (COLORS[token] for token in tokens & COLORS.keys()))
+    colors = {COLORS[token] for token in tokens & COLORS.keys()}
+    slash_groups = [
+        {COLORS[part.strip()] for part in match.group(0).split("/")}
+        for match in re.finditer(r"\b[a-z]+(?:\s*/\s*[a-z]+)+\b", text)
+        if all(part.strip() in COLORS for part in match.group(0).split("/"))
+    ]
+    if len(colors) > 1 and colors in slash_groups:
+        # "Branco/Cinza" names one two-tone item; separate colors stay a conflict.
+        attrs["color"] = "/".join(sorted(colors))
+    else:
+        single("color", colors)
     single("accessory", (ACCESSORIES[token] for token in tokens & ACCESSORIES.keys()))
     variants = tokens & VARIANTS
     if variants:

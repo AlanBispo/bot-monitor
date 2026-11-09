@@ -37,7 +37,7 @@ async def request_limited(
 class HTTPStoreAdapter(StoreAdapter):
     def __init__(self, timeout_seconds: float = 15, max_response_bytes: int = 2_000_000):
         self.timeout_seconds = timeout_seconds
-        self.max_response_bytes = max(1024, max_response_bytes)
+        self.max_response_bytes = max_response_bytes
 
     def _client(self):
         return httpx.AsyncClient(

@@ -65,9 +65,6 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
             socket_options=socket_options,
         )
 
-    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
-        raise OSError("Unix sockets não são permitidos")
-
     async def sleep(self, seconds):
         await self._backend.sleep(seconds)
 

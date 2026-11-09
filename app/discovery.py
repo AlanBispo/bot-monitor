@@ -25,8 +25,6 @@ class CandidateURL:
     url: str
     source: str
     store_hint: str | None = None
-    title: str = ""
-    snippet_price: object | None = None
 
 
 @dataclass(frozen=True)
@@ -96,36 +94,8 @@ class AdapterDiscoveryProvider(DiscoveryProvider):
         self.name = f"store:{adapter.name}"
 
     async def discover(self, query: SearchQuery) -> list[CandidateURL]:
-        found: list[CandidateURL] = []
-        for variant in query.variants:
-            for result in await self.adapter.search(variant):
-                found.append(
-                    CandidateURL(
-                        result.url,
-                        self.name,
-                        result.store,
-                        result.title,
-                        # This field is deliberately retained only as provenance/display input.
-                        result.product_price,
-                    )
-                )
-        return found
-
-
-class StaticDiscoveryProvider(DiscoveryProvider):
-    """Small deterministic provider useful for fixtures and local acceptance tests."""
-
-    def __init__(self, name: str, results: list[CandidateURL], error: Exception | None = None):
-        self.name = name
-        self.results = results
-        self.error = error
-        self.queries: list[SearchQuery] = []
-
-    async def discover(self, query: SearchQuery) -> list[CandidateURL]:
-        self.queries.append(query)
-        if self.error:
-            raise self.error
-        return list(self.results)
+        results = await self.adapter.search(query.normalized_text)
+        return [CandidateURL(result.url, self.name, result.store) for result in results]
 
 
 class JsonWebDiscoveryProvider(DiscoveryProvider):
@@ -140,7 +110,6 @@ class JsonWebDiscoveryProvider(DiscoveryProvider):
         endpoint: str,
         *,
         api_key: str | None = None,
-        client=None,
         name="web",
         max_response_bytes: int = 1_000_000,
         timeout_seconds: float = 10,
@@ -148,39 +117,27 @@ class JsonWebDiscoveryProvider(DiscoveryProvider):
     ):
         self.endpoint = validate_url(endpoint)
         self.api_key = api_key
-        self.client = client
         self.name = name
-        self.max_response_bytes = max(1024, max_response_bytes)
-        self.timeout_seconds = max(0.1, timeout_seconds)
-        if api_format not in {"json", "searxng"}:
-            raise ValueError("formato de descoberta deve ser json ou searxng")
+        self.max_response_bytes = max_response_bytes
+        self.timeout_seconds = timeout_seconds
         self.api_format = api_format
 
     async def discover(self, query: SearchQuery) -> list[CandidateURL]:
         params = {"q": query.normalized_text}
         if self.api_format == "searxng":
             params.update({"format": "json", "language": "pt-BR", "categories": "general"})
-        if self.client is None:
-            import httpx
+        import httpx
 
-            from .network import PinnedAsyncHTTPTransport
+        from .network import PinnedAsyncHTTPTransport
 
-            async with httpx.AsyncClient(
-                transport=PinnedAsyncHTTPTransport(),
-                timeout=self.timeout_seconds,
-                follow_redirects=False,
-                trust_env=False,
-            ) as client:
-                response = await request_limited(
-                    client,
-                    self.endpoint,
-                    self.max_response_bytes,
-                    params=params,
-                    headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
-                )
-        else:
+        async with httpx.AsyncClient(
+            transport=PinnedAsyncHTTPTransport(),
+            timeout=self.timeout_seconds,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
             response = await request_limited(
-                self.client,
+                client,
                 self.endpoint,
                 self.max_response_bytes,
                 params=params,
@@ -194,12 +151,7 @@ class JsonWebDiscoveryProvider(DiscoveryProvider):
         for item in payload.get("results", []):
             if not isinstance(item, dict) or not isinstance(item.get("url"), str):
                 continue
-            found.append(
-                CandidateURL(
-                    item["url"], self.name, item.get("store"), item.get("title", ""),
-                    item.get("price"),
-                )
-            )
+            found.append(CandidateURL(item["url"], self.name, item.get("store")))
         return found
 
 
@@ -207,39 +159,19 @@ class DiscoveryOrchestrator:
     def __init__(
         self,
         adapters: dict[str, StoreAdapter],
-        providers: list[DiscoveryProvider] | None = None,
+        providers: list[DiscoveryProvider],
         *,
-        source_timeout: float | dict[str, float] = 15,
+        source_timeout: float = 15,
         max_candidates: int = 50,
         concurrency: int = 4,
         generic_adapter: StoreAdapter | None = None,
     ):
         self.adapters = adapters
         self.generic_adapter = generic_adapter
-        self.providers = providers if providers is not None else [
-            AdapterDiscoveryProvider(adapter)
-            for adapter in adapters.values()
-            if adapter.name != "generic"
-        ]
-        if isinstance(source_timeout, dict):
-            self.source_timeouts = {
-                name: max(0.1, float(timeout)) for name, timeout in source_timeout.items()
-            }
-            self.source_timeout = 15.0
-        else:
-            self.source_timeout = max(0.1, float(source_timeout))
-            self.source_timeouts = {}
-        self.max_candidates = max(1, max_candidates)
-        self.semaphore = asyncio.Semaphore(max(1, concurrency))
-
-    def _timeout_for(self, source: str) -> float:
-        if source in self.source_timeouts:
-            return self.source_timeouts[source]
-        if source.startswith("store:"):
-            store_name = source.removeprefix("store:")
-            if store_name in self.source_timeouts:
-                return self.source_timeouts[store_name]
-        return self.source_timeout
+        self.providers = providers
+        self.source_timeout = source_timeout
+        self.max_candidates = max_candidates
+        self.semaphore = asyncio.Semaphore(concurrency)
 
     @staticmethod
     def _canonical(url: str) -> str:
@@ -260,7 +192,7 @@ class DiscoveryOrchestrator:
         try:
             async with self.semaphore:
                 values = await asyncio.wait_for(
-                    provider.discover(query), timeout=self._timeout_for(provider.name)
+                    provider.discover(query), timeout=self.source_timeout
                 )
             return provider.name, values, None
         except Exception as exc:  # external source isolation is intentional
@@ -283,7 +215,7 @@ class DiscoveryOrchestrator:
                 return candidate, None, None, None, "unsupported_store"
             async with self.semaphore:
                 offer = await asyncio.wait_for(
-                    adapter.get_offer(safe_url), timeout=self._timeout_for(adapter.name)
+                    adapter.get_offer(safe_url), timeout=self.source_timeout
                 )
             if not offer.canonical_url:
                 offer = replace(offer, canonical_url=safe_url, discovery_source=candidate.source)

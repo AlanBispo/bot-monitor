@@ -85,8 +85,6 @@ def calculate_price(
     )
     if confirmed > product:
         raise InvalidMoney("desconto confirmado maior que o preço")
-    if possible is not None and possible > product:
-        raise InvalidMoney("desconto possível maior que o preço")
     if possible is not None and confirmed + possible > product + (shipping or Decimal("0.00")):
         raise InvalidMoney("descontos combinados maiores que o preço")
     guaranteed = None if shipping is None else money(product + shipping - confirmed)
