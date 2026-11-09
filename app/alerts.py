@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import textwrap
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from urllib.parse import urlsplit
 
 from .database import Database
 from .models import Alert, Listing, PriceSnapshot, Product
@@ -20,6 +22,8 @@ LOW_WINDOW_DAYS = 90
 # A "lowest in N days" claim needs history that actually spans a meaningful period.
 LOW_MIN_HISTORY_DAYS = 7
 RATING_MIN_SAMPLES = 10
+MAX_TITLE_LENGTH = 80
+STORE_LABELS = {"amazon": "Amazon", "mercadolivre": "Mercado Livre", "magalu": "Magalu"}
 # A new cheapest offer must beat the previous one by this share to be reported.
 LEADER_MARGIN = Decimal("0.01")
 LOW_PRICE = "LOW_PRICE"
@@ -295,26 +299,42 @@ class AlertEngine:
         )
 
 
-def _note_lines(notes: list[str]) -> str:
-    return "".join(f"{note}\n" for note in notes)
+def _short_title(name: str) -> str:
+    return textwrap.shorten(name, width=MAX_TITLE_LENGTH, placeholder="…")
+
+
+def _store_label(listing: Listing) -> str:
+    if listing.store == "generic":
+        return (urlsplit(listing.url).hostname or "site").removeprefix("www.")
+    return STORE_LABELS.get(listing.store, listing.store)
+
+
+def _delivery_line(listing: Listing, snapshot: PriceSnapshot) -> str:
+    if snapshot.shipping_price is None:
+        shipping = "frete não informado"
+    elif snapshot.shipping_price == 0:
+        shipping = "frete grátis"
+    else:
+        shipping = f"frete {format_brl(snapshot.shipping_price)}"
+    return f"{_store_label(listing)} · {shipping}"
 
 
 def format_drop_alert(
     product: Product, listing: Listing, snapshot: PriceSnapshot, reference: Decimal,
     notes: list[str],
 ) -> str:
-    shipping = (
-        "desconhecido (total com frete não confirmado)"
-        if snapshot.shipping_price is None else format_brl(snapshot.shipping_price)
-    )
-    return (
-        f"📉 Preço do produto caiu!\n{product.name}\nLoja: {listing.store}\n"
-        f"Referência anterior: {format_brl(reference)}\n"
-        f"Agora: {format_brl(snapshot.product_price)}\n"
-        f"Queda: {format_brl(reference - snapshot.product_price)}\nFrete: {shipping}\n"
-        f"Comparação do preço do produto, sem frete e sem cupons condicionais.\n"
-        f"{_note_lines(notes)}{listing.url}"
-    )
+    saved = reference - snapshot.product_price
+    percent = saved / reference * 100
+    shown = f"{percent:.0f}" if percent >= 1 else f"{percent:.1f}".replace(".", ",")
+    lines = [
+        f"📉 Caiu {shown}% → {format_brl(snapshot.product_price)}",
+        _short_title(product.name),
+        "",
+        f"Antes {format_brl(reference)} · economia de {format_brl(saved)}",
+        _delivery_line(listing, snapshot),
+        *notes,
+    ]
+    return "\n".join(lines)
 
 
 def format_event_alert(
@@ -322,12 +342,14 @@ def format_event_alert(
     events: list[tuple[str, Decimal, str]],
     notes: list[str],
 ) -> str:
-    lines = [f"{product.name}", f"Loja: {listing.store}",
-             f"Preço do produto: {format_brl(snapshot.product_price)} (sem frete)"]
-    for kind, _, detail in events:
-        lines.append(f"{EVENT_LABELS[kind]}" + (f": {detail}" if detail else ""))
-    lines.extend(notes)
-    lines.append(listing.url)
+    lines = [
+        *(f"{EVENT_LABELS[kind]}" + (f": {detail}" if detail else "")
+          for kind, _, detail in events),
+        _short_title(product.name),
+        "",
+        f"{format_brl(snapshot.product_price)} · {_delivery_line(listing, snapshot)}",
+        *notes,
+    ]
     return "\n".join(lines)
 
 
@@ -342,12 +364,12 @@ def describe_queued_alert(alert: Alert) -> str:
 def format_target_alert(
     product: Product, listing: Listing, snapshot: PriceSnapshot, notes: list[str],
 ) -> str:
-    shipping = (
-        "desconhecido" if snapshot.shipping_price is None else format_brl(snapshot.shipping_price)
-    )
-    return (
-        f"🎯 Preço-alvo atingido\n{product.name}\n"
-        f"Loja: {listing.store}\nPreço efetivo: {format_brl(snapshot.effective_price)}\n"
-        f"Produto: {format_brl(snapshot.product_price)}\nFrete: {shipping}\n"
-        f"{_note_lines(notes)}{listing.url}"
-    )
+    lines = [
+        f"🎯 Atingiu seu alvo → {format_brl(snapshot.effective_price)}",
+        _short_title(product.name),
+        "",
+        f"Alvo {format_brl(product.target_price)} · produto {format_brl(snapshot.product_price)}",
+        _delivery_line(listing, snapshot),
+        *notes,
+    ]
+    return "\n".join(lines)

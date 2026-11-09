@@ -127,7 +127,7 @@ def sent():
 @pytest.fixture
 def send(sent):
     async def deliver(message, actions=None):
-        sent.append(message)
+        sent.append(f"{message}\n{actions.url}" if actions else message)
 
     return deliver
 
@@ -456,6 +456,31 @@ async def test_product_alerts_only_cheapest_store_and_reports_new_leader(db, sen
     assert await monitor.check_once(send) == 1
     assert second.url in sent[-1]
     assert [alert.alert_type for alert in db.queued_alerts()] == ["CHEAPER_STORE"]
+
+
+async def test_price_drop_message_leads_with_percent_and_price(db, send, sent):
+    title = "Ar Condicionado Split Midea Inverter AI 12000 BTU/h Frio 42EFVCA12M8 - 127 Volts"
+    _, listing = db.register_product_listing(
+        title, Decimal("100"), "amazon", "https://www.amazon.com.br/dp/X", title,
+        monitoring_mode="price_drop",
+    )
+    product = db.get_product(listing.product_id)
+    observe(db, listing.id, "2664.28")
+
+    async def collect(message, actions):
+        sent.append((message, actions))
+
+    snapshot = db.add_snapshot(
+        listing.id, Decimal("2344.00"), None, None, None, None, None, True, None,
+    )
+    assert await AlertEngine(db).process(product, listing, snapshot, collect)
+    message, actions = sent[0]
+    lines = message.split("\n")
+    assert lines[0] == "📉 Caiu 12% → R$ 2.344,00"
+    assert len(lines[1]) <= 80
+    assert lines[3] == "Antes R$ 2.664,28 · economia de R$ 320,28"
+    assert lines[4] == "Amazon · frete não informado"
+    assert listing.url not in message and actions.url == listing.url
 
 
 async def test_alert_says_how_good_the_price_is(db, send, sent):

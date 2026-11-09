@@ -29,7 +29,7 @@ def make_sender(bot, chat_id: int, quiet_hours: tuple[time, time] | None):
         except BadRequest:
             if markup is None:
                 raise
-            # Telegram refuses some store URLs as buttons; the alert still has to arrive.
-            await bot.send_message(chat_id, text, disable_notification=silent)
+            # Telegram refuses some store URLs as buttons; the link then goes in the text.
+            await bot.send_message(chat_id, f"{text}\n{actions.url}", disable_notification=silent)
 
     return send
