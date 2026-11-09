@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..discovery import SearchOutcome
+from ..pricing import format_brl
 
 MAX_EXTERNAL_TITLE_LENGTH = 300
 TELEGRAM_TEXT_LIMIT = 4096
@@ -81,17 +82,17 @@ def format_discovery_results(session_id: str, outcome: SearchOutcome) -> str:
         if result.pricing is None:
             price = "sem preço confiável"
         elif result.pricing.effective_price is not None:
-            price = f"efetivo R$ {result.pricing.effective_price:.2f}"
+            price = f"efetivo {format_brl(result.pricing.effective_price)}"
             if result.pricing.possible_effective_price is not None:
                 possible = result.pricing.possible_effective_price
-                price += f"; possível R$ {possible:.2f} (condicional)"
+                price += f"; possível {format_brl(possible)} (condicional)"
             if result.uncertainty:
                 price += f" ({result.uncertainty})"
         else:
-            price = (f"produto R$ {result.pricing.product_price:.2f}; "
+            price = (f"produto {format_brl(result.pricing.product_price)}; "
                      "frete desconhecido; total não calculável; não é o menor garantido")
             if result.pricing.possible_effective_price is not None:
-                price += f"; possível R$ {result.pricing.possible_effective_price:.2f}"
+                price += f"; possível {format_brl(result.pricing.possible_effective_price)}"
         marker = result.decision.status
         lines.append(
             f"{result.short_id}. [{result.offer.store}] "

@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from .alerts import describe_queued_alert
 from .database import Database
 from .models import Alert
+from .pricing import format_brl
 
 
 def build_daily_summary(database: Database, now: datetime | None = None) -> tuple[str, list[Alert]]:
@@ -57,10 +58,11 @@ def build_daily_summary(database: Database, now: datetime | None = None) -> tupl
             current, before = min(prices, key=lambda item: item[0])
             change = ""
             if before is not None and before != current:
-                change = f" · 24h: {'+' if current > before else '-'}R$ {abs(current - before):.2f}"
-            target = (f" (alvo R$ {product.target_price:.2f})"
+                sign = "+" if current > before else "-"
+                change = f" · 24h: {sign}{format_brl(abs(current - before))}"
+            target = (f" (alvo {format_brl(product.target_price)})"
                       if product.monitoring_mode == "target" else "")
-            lines.append(f"• {product.id}. {product.name}: R$ {current:.2f}{target}{change}")
+            lines.append(f"• {product.id}. {product.name}: {format_brl(current)}{target}{change}")
 
     failing = [health for health in database.store_health() if health.consecutive_failures]
     if failing:

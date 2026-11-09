@@ -11,6 +11,7 @@ from decimal import Decimal
 
 from .database import Database
 from .models import Alert, Listing, PriceSnapshot, Product
+from .pricing import format_brl
 
 LOGGER = logging.getLogger(__name__)
 
@@ -86,7 +87,9 @@ class AlertEngine:
                  if row.id < snapshot.id and row.available and row.product_price is not None),
                 None,
             )
-            detail = f"último preço antes de esgotar: R$ {last_price:.2f}" if last_price else ""
+            detail = ""
+            if last_price:
+                detail = f"último preço antes de esgotar: {format_brl(last_price)}"
             events.append((BACK_IN_STOCK, last_price or price, detail))
         # Price-drop products already alert on every new low; avoid duplicate messages.
         if product.monitoring_mode != "target":
@@ -119,7 +122,7 @@ class AlertEngine:
                     percent = (reference - price) / reference * 100
                     events.append((
                         PERCENT_DROP, reference,
-                        f"-{percent:.0f}% em relação a R$ {reference:.2f} "
+                        f"-{percent:.0f}% em relação a {format_brl(reference)} "
                         f"(últimos {DROP_WINDOW_DAYS} dias)",
                     ))
         return events
@@ -199,12 +202,13 @@ def format_drop_alert(
 ) -> str:
     shipping = (
         "desconhecido (total com frete não confirmado)"
-        if snapshot.shipping_price is None else f"R$ {snapshot.shipping_price:.2f}"
+        if snapshot.shipping_price is None else format_brl(snapshot.shipping_price)
     )
     return (
         f"📉 Preço do produto caiu!\n{product.name}\nLoja: {listing.store}\n"
-        f"Referência anterior: R$ {reference:.2f}\nAgora: R$ {snapshot.product_price:.2f}\n"
-        f"Queda: R$ {reference - snapshot.product_price:.2f}\nFrete: {shipping}\n"
+        f"Referência anterior: {format_brl(reference)}\n"
+        f"Agora: {format_brl(snapshot.product_price)}\n"
+        f"Queda: {format_brl(reference - snapshot.product_price)}\nFrete: {shipping}\n"
         f"Comparação do preço do produto, sem frete e sem cupons condicionais.\n{listing.url}"
     )
 
@@ -214,7 +218,7 @@ def format_event_alert(
     events: list[tuple[str, Decimal, str]],
 ) -> str:
     lines = [f"{product.name}", f"Loja: {listing.store}",
-             f"Preço do produto: R$ {snapshot.product_price:.2f} (sem frete)"]
+             f"Preço do produto: {format_brl(snapshot.product_price)} (sem frete)"]
     for kind, _, detail in events:
         lines.append(f"{EVENT_LABELS[kind]}" + (f": {detail}" if detail else ""))
     lines.append(listing.url)
@@ -225,16 +229,16 @@ def describe_queued_alert(alert: Alert) -> str:
     """One-line description of a stored event for the daily summary."""
     label = EVENT_LABELS.get(alert.alert_type, alert.alert_type)
     if alert.alert_type == BACK_IN_STOCK:
-        return f"{label} por R$ {alert.price:.2f}"
-    return f"{label}: R$ {alert.target_price:.2f} → R$ {alert.price:.2f}"
+        return f"{label} por {format_brl(alert.price)}"
+    return f"{label}: {format_brl(alert.target_price)} → {format_brl(alert.price)}"
 
 
 def format_target_alert(product: Product, listing: Listing, snapshot: PriceSnapshot) -> str:
     shipping = (
-        "desconhecido" if snapshot.shipping_price is None else f"R$ {snapshot.shipping_price:.2f}"
+        "desconhecido" if snapshot.shipping_price is None else format_brl(snapshot.shipping_price)
     )
     return (
         f"🎯 Preço-alvo atingido\n{product.name}\n"
-        f"Loja: {listing.store}\nPreço efetivo: R$ {snapshot.effective_price:.2f}\n"
-        f"Produto: R$ {snapshot.product_price:.2f}\nFrete: {shipping}\n{listing.url}"
+        f"Loja: {listing.store}\nPreço efetivo: {format_brl(snapshot.effective_price)}\n"
+        f"Produto: {format_brl(snapshot.product_price)}\nFrete: {shipping}\n{listing.url}"
     )

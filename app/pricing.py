@@ -23,6 +23,11 @@ def money(value: Decimal) -> Decimal:
     return value.quantize(CENT, rounding=ROUND_HALF_UP)
 
 
+def format_brl(value: Decimal) -> str:
+    text = f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {text}"
+
+
 def parse_money(value: str | Decimal | int | float, *, allow_zero: bool = False) -> Decimal:
     """Parse common Brazilian or plain decimal notation without accepting junk."""
     if isinstance(value, Decimal):

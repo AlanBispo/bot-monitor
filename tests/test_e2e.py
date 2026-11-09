@@ -18,7 +18,7 @@ from app.discovery import CandidateURL, DiscoveryOrchestrator, DiscoveryProvider
 from app.identity import explicit_attributes
 from app.models import SearchEntry, StoreOffer
 from app.monitor import Monitor, ScheduleSettings
-from app.pricing import InvalidMoney, calculate_price, parse_money
+from app.pricing import InvalidMoney, calculate_price, format_brl, parse_money
 from app.security import UnsafeURL, validate_url
 from app.settings import Settings
 from app.stores import amazon
@@ -155,7 +155,7 @@ async def test_each_store_monitors_page_and_alerts_target_once(adapter, url, htm
     assert await monitor.check_once(send) == 1
     assert await monitor.check_once(send) == 0
     assert len(db.history(listing.id)) == 2
-    assert len(sent) == 1 and "R$ 100.00" in sent[0]
+    assert len(sent) == 1 and "R$ 100,00" in sent[0]
 
 
 async def test_mercadolivre_login_wall_reports_and_registers_nothing(db):
@@ -438,6 +438,7 @@ def test_token_is_redacted_from_logs():
 
 
 def test_pricing_rules():
+    assert format_brl(Decimal("2664.28")) == "R$ 2.664,28"
     assert parse_money("R$ 1.234,56") == Decimal("1234.56")
     with pytest.raises(InvalidMoney):
         parse_money("abc")

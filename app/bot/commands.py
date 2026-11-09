@@ -18,7 +18,7 @@ from ..database import MAX_CHECK_INTERVAL, MIN_CHECK_INTERVAL, Database, Databas
 from ..digest import build_daily_summary
 from ..export import history_csv
 from ..matching import match_offer, match_product, offer_identity_attributes
-from ..pricing import calculate_price, parse_money
+from ..pricing import calculate_price, format_brl, parse_money
 from ..query import parse_query
 from ..security import UnsafeURL, validate_url
 from ..stores.base import StoreAdapter, StoreError, collect_offer
@@ -249,7 +249,7 @@ class Commands:
             initial_pricing=pricing,
         )
         mode = (
-            f"Alvo: R$ {target:.2f} (preço efetivo com frete conhecido)."
+            f"Alvo: {format_brl(target)} (preço efetivo com frete conhecido)."
             if target is not None else
             "Avisarei a cada novo menor preço do produto desde o cadastro."
         )
@@ -258,11 +258,11 @@ class Commands:
                 "Frete desconhecido; o alerta de preço-alvo aguarda um total confiável."
                 if target is not None else
                 "Frete desconhecido; os avisos de queda comparam apenas o preço do produto."
-            ) if pricing.shipping_price is None else f"Frete: R$ {pricing.shipping_price:.2f}."
+            ) if pricing.shipping_price is None else f"Frete: {format_brl(pricing.shipping_price)}."
         )
         await update.effective_message.reply_text(
             f"Produto cadastrado: {product.name}\n"
-            f"Preço atual do produto salvo: R$ {pricing.product_price:.2f}\n"
+            f"Preço atual do produto salvo: {format_brl(pricing.product_price)}\n"
             f"{mode}\n{shipping}\nListing {listing.id} será monitorado no próximo ciclo."
         )
 
@@ -413,7 +413,7 @@ class Commands:
         self.pending_target.pop(update.effective_chat.id, None)
         product = self.database.update_target(product_id, target)
         await update.effective_message.reply_text(
-            f"Alvo do produto {product.id}: R$ {product.target_price:.2f}. "
+            f"Alvo do produto {product.id}: {format_brl(product.target_price)}. "
             "O alerta considera o total com frete conhecido."
         )
 
@@ -475,7 +475,7 @@ class Commands:
         for product in products:
             mode = (
                 "avisar novos menores preços do produto" if product.monitoring_mode == "price_drop"
-                else f"alvo R$ {product.target_price:.2f}"
+                else f"alvo {format_brl(product.target_price)}"
             )
             interval = (f"; checagem a cada {product.check_interval_minutes} min"
                         if product.check_interval_minutes else "")
@@ -512,7 +512,7 @@ class Commands:
             f"Produto {product_id}: {stats.samples} observações confiáveis",
             (
                 (
-                    f"Atual: R$ {stats.current_price:.2f}"
+                    f"Atual: {format_brl(stats.current_price)}"
                     + (
                         " (menor oferta confiável; há listing sem preço atual)"
                         if stats.current_uncertain
@@ -522,10 +522,10 @@ class Commands:
                 if stats.current_price is not None
                 else "Atual: indisponível ou não calculável"
             ),
-            f"Mínimo: R$ {stats.lowest_price:.2f}",
-            f"Máximo: R$ {stats.highest_price:.2f}",
-            f"Média: R$ {stats.average_price:.2f}",
-            f"Menor no período consultado: R$ {stats.lowest_in_window:.2f}",
+            f"Mínimo: {format_brl(stats.lowest_price)}",
+            f"Máximo: {format_brl(stats.highest_price)}",
+            f"Média: {format_brl(stats.average_price)}",
+            f"Menor no período consultado: {format_brl(stats.lowest_in_window)}",
         ]
         current_by_store = self.database.current_state_by_store(product_id)
         history_by_store = self.database.history_by_store(product_id)
@@ -538,7 +538,7 @@ class Commands:
             if valid:
                 current_price, current_uncertain = current_by_store[store]
                 current = (
-                    f"R$ {current_price:.2f}"
+                    format_brl(current_price)
                     + (
                         " (menor oferta confiável; há listing sem preço atual)"
                         if current_uncertain
@@ -547,7 +547,7 @@ class Commands:
                     if current_price is not None
                     else "indisponível ou não calculável"
                 )
-                lines.append(f"{store}: atual {current}, mínimo R$ {min(valid):.2f}")
+                lines.append(f"{store}: atual {current}, mínimo {format_brl(min(valid))}")
         await self._reply(update, "\n".join(lines))
         await self._send_chart(update.effective_message, product, days)
 
@@ -624,18 +624,18 @@ class Commands:
                 continue
             latest = rows[-1]
             current = (
-                f"R$ {latest.product_price:.2f}"
+                format_brl(latest.product_price)
                 if latest.available and latest.product_price is not None and not listing.last_error
                 else "indisponível ou consulta mais recente falhou"
             )
             shipping = (
                 "desconhecido" if latest.shipping_price is None
-                else f"R$ {latest.shipping_price:.2f}"
+                else format_brl(latest.shipping_price)
             )
             lines.append(
                 f"Listing {listing.id} [{listing.store}]: {len(prices)} observações\n"
-                f"Inicial: R$ {prices[0]:.2f}\nAtual: {current}\n"
-                f"Mínimo: R$ {min(prices):.2f}\nMáximo: R$ {max(prices):.2f}\n"
+                f"Inicial: {format_brl(prices[0])}\nAtual: {current}\n"
+                f"Mínimo: {format_brl(min(prices))}\nMáximo: {format_brl(max(prices))}\n"
                 f"Frete da última observação: {shipping}"
             )
         if len(lines) == 2:
@@ -684,9 +684,9 @@ class Commands:
                 snapshot = self.database.latest_snapshot(listing.id)
                 if snapshot and snapshot.product_price is not None:
                     shipping = ("frete desconhecido" if snapshot.shipping_price is None else
-                                f"frete R$ {snapshot.shipping_price:.2f}")
+                                f"frete {format_brl(snapshot.shipping_price)}")
                     lines.append(
-                        f"Última coleta: produto R$ {snapshot.product_price:.2f}; {shipping}."
+                        f"Última coleta: produto {format_brl(snapshot.product_price)}; {shipping}."
                     )
         await self._reply(update, "\n".join(lines))
 
@@ -698,7 +698,7 @@ class Commands:
             product_identifier(context.args[0]), parse_money(context.args[1]),
         )
         await update.effective_message.reply_text(
-            f"Alvo do produto {product.id}: R$ {product.target_price:.2f}. "
+            f"Alvo do produto {product.id}: {format_brl(product.target_price)}. "
             "O alerta considera o total com frete conhecido."
         )
 

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from .database import Database
 from .models import Product
+from .pricing import format_brl
 
 
 class NoChartData(ValueError):
@@ -52,7 +53,7 @@ def render_price_chart(database: Database, product: Product, days: int = 90) -> 
                   marker="o", markersize=3, linewidth=1.6, label=label)
     if product.monitoring_mode == "target":
         axis.axhline(float(product.target_price), color="#c0392b", linestyle="--",
-                     linewidth=1.2, label=f"alvo R$ {product.target_price:.2f}")
+                     linewidth=1.2, label=f"alvo {format_brl(product.target_price)}")
     axis.set_title(product.name[:80], fontsize=11)
     axis.set_ylabel("R$")
     axis.grid(True, alpha=0.3)
