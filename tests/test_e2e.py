@@ -398,6 +398,17 @@ async def test_error_handler_only_notifies_the_authorized_chat(db):
     assert messages == [123]
 
 
+async def test_pasted_link_registers_product_and_clears_pending_edit(db):
+    product, _ = register(db, url=URL + "/velho")
+    bot = TelegramBot(db, {"shop": Shop()}, 123)
+    await bot.product_button(tap(f"prd:target:{product.id}")[0], None)
+    response = update(f"olha esse {URL}.")
+    await bot.selection_price(response, None)
+    assert "Produto cadastrado" in response.effective_message.replies[0]
+    assert not bot.pending_target
+    assert db.list_listings()[-1].url == URL
+
+
 async def test_unauthorized_chat_cannot_control_the_bot(db):
     product, _ = register(db)
     bot = TelegramBot(db, {}, 123)

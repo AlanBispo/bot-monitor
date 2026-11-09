@@ -114,5 +114,7 @@ def build_application(
         )
     application.add_handler(CallbackQueryHandler(bot.selection_button, pattern=r"^sel:"))
     application.add_handler(CallbackQueryHandler(bot.product_button, pattern=r"^prd:"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.selection_price))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, bot.selection_price, block=False)
+    )
     return application

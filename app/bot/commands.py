@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import re
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
 from functools import wraps
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from ..charts import NoChartData, render_price_chart
@@ -33,6 +35,7 @@ from .formatting import (
 MAX_QUERY_LENGTH = 200
 MAX_HISTORY_DAYS = 3650
 LAST_SUMMARY_KEY = "last_daily_summary"
+LINK = re.compile(r"https?://\S+", re.IGNORECASE)
 
 
 def command(handler):
@@ -138,6 +141,7 @@ class Commands:
     @command
     async def help(self, update, context) -> None:
         await update.effective_message.reply_text(
+            "Cole um link no chat — monitorar esse produto\n"
             "/buscar NOME — procurar produtos\n"
             "/selecionar BUSCA RESULTADO ALVO — confirmar resultado\n"
             "/confirmar BUSCA RESULTADO ALVO — confirmar resultado ambíguo\n"
@@ -373,13 +377,20 @@ class Commands:
 
     @command
     async def selection_price(self, update, context) -> None:
+        link = LINK.search(getattr(update.effective_message, "text", "") or "")
+        if link:
+            self.pending_selection.pop(update.effective_chat.id, None)
+            self.pending_target.pop(update.effective_chat.id, None)
+            url = link.group(0).rstrip(".,;:!)")
+            await self._add(update, SimpleNamespace(args=[url]), require_target=False)
+            return
         product_id = self.pending_target.get(update.effective_chat.id)
         if product_id is not None:
             await self._apply_pending_target(update, product_id)
             return
         selection = self.pending_selection.get(update.effective_chat.id)
         if selection is None:
-            await update.effective_message.reply_text("Use /buscar ou /help para começar.")
+            await update.effective_message.reply_text("Cole o link de um produto ou use /buscar.")
             return
         raw = getattr(update.effective_message, "text", "") or ""
         try:
