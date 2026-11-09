@@ -3,7 +3,17 @@
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+STORE_DOMAINS = {
+    "amazon": {"amazon.com.br", "amazon.com", "a.co"},
+    "mercadolivre": {"mercadolivre.com.br", "mercadolibre.com.br"},
+    "magalu": {"magazineluiza.com.br", "magalu.com"},
+}
 TRACKING = {"ref", "ref_", "tag", "linkcode", "ascsubtag", "campaign", "matt_tool", "matt_word"}
+
+
+def host_matches(host: str, domains) -> bool:
+    """True when host is one of the domains or a subdomain of one."""
+    return any(host == domain or host.endswith(f".{domain}") for domain in domains)
 
 
 def listing_url(url: str, canonical: str | None = None) -> str:
@@ -13,17 +23,7 @@ def listing_url(url: str, canonical: str | None = None) -> str:
     if source.hostname != chosen.hostname:
         chosen = source
     host = source.hostname or ""
-    known_store = any(
-        host == domain or host.endswith(f".{domain}")
-        for domain in (
-            "amazon.com.br",
-            "amazon.com",
-            "mercadolivre.com.br",
-            "mercadolibre.com.br",
-            "magazineluiza.com.br",
-            "magalu.com",
-        )
-    )
+    known_store = any(host_matches(host, domains) for domains in STORE_DOMAINS.values())
     canonical_changed = bool(canonical) and (source.path, source.query) != (
         chosen.path,
         chosen.query,

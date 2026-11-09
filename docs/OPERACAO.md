@@ -24,7 +24,7 @@ O monitor usa os atributos da oferta confirmada, além da busca original. Se uma
 
 ## Diagnóstico e recuperação
 
-`/check` informa coletas válidas, falhas, frete desconhecido, alertas enviados e falhas de envio. `/status` mostra as lojas com falhas seguidas, além da última tentativa, do último sucesso e do erro de cada oferta. Uma loja em que todas as consultas falharam por `STORE_FAILURE_ALERT_CYCLES` ciclos gera um único aviso, e outro quando ela volta. Uma falha de correspondência do produto não conta como falha da loja. Um preço anterior não é tratado como atual quando a consulta mais recente falhou.
+`/check` informa coletas válidas, falhas, frete desconhecido, alertas enviados e falhas de envio. `/status` mostra as lojas com falhas seguidas, além da última tentativa, do último sucesso e do erro de cada oferta. Uma loja em que todas as consultas falharam por `STORE_FAILURE_ALERT_CYCLES` ciclos gera um único aviso, e outro quando ela volta. Uma falha de correspondência do produto não conta como falha da loja. Sites genéricos são acompanhados por domínio. Um preço anterior não é tratado como atual quando a consulta mais recente falhou.
 
 Alertas de preço têm estado pendente distinto de enviado. Uma falha no Telegram ou cancelamento mantém o evento para o próximo ciclo, inclusive após reiniciar. A repetição exige uma observação nova que ainda satisfaça a condição. Oferta indisponível, frete desconhecido no modo alvo, desativação ou preço fora do alvo cancelam pendências incompatíveis.
 

@@ -147,6 +147,17 @@ O caminho sem serviço pago é deixar `GENERIC_DISCOVERY_ENDPOINT` vazio e usar 
 
 Os corpos HTTP são lidos em fluxo e interrompidos ao ultrapassar `MAX_RESPONSE_BYTES`, antes de acumular a resposta inteira na memória. O endpoint configurado também é limitado e não segue redirecionamentos; URLs de produto podem seguir até três redirecionamentos, revalidando cada destino.
 
+## Dependências travadas
+
+`requirements.lock` guarda as versões testadas. Para instalar exatamente essas versões no Windows:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.lock
+.\.venv\Scripts\python.exe -m pip install --no-deps -e .
+```
+
+Depois de atualizar dependências e validar o bot, regenere o arquivo com `pip freeze --exclude-editable`.
+
 ## Qualidade
 
 ```bash

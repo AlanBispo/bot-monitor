@@ -19,12 +19,9 @@ def render_price_chart(database: Database, product: Product, days: int = 90) -> 
     A listing without any known shipping falls back to the product price and says so in the
     legend, so values with and without shipping are never mixed on the same line.
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
     import matplotlib.dates as mdates
-    import matplotlib.pyplot as plt
     import matplotlib.ticker as mticker
+    from matplotlib.figure import Figure
 
     since = datetime.now(UTC) - timedelta(days=days)
     series = []
@@ -47,30 +44,28 @@ def render_price_chart(database: Database, product: Product, days: int = 90) -> 
     if not series:
         raise NoChartData("Nenhum preço confiável no período para gerar o gráfico.")
 
-    figure, axis = plt.subplots(figsize=(9, 4.8), dpi=120)
-    try:
-        for label, points in series:
-            moments = [moment.astimezone() for moment, _ in points]
-            axis.plot(moments, [float(price) for _, price in points],
-                      marker="o", markersize=3, linewidth=1.6, label=label)
-        if product.monitoring_mode == "target":
-            axis.axhline(float(product.target_price), color="#c0392b", linestyle="--",
-                         linewidth=1.2, label=f"alvo R$ {product.target_price:.2f}")
-        axis.set_title(product.name[:80], fontsize=11)
-        axis.set_ylabel("R$")
-        axis.grid(True, alpha=0.3)
-        axis.yaxis.set_major_formatter(
-            mticker.FuncFormatter(
-                lambda value, _: f"{value:,.2f}".replace(",", "X").replace(".", ",")
-                .replace("X", ".")
-            )
+    figure = Figure(figsize=(9, 4.8), dpi=120)
+    axis = figure.subplots()
+    for label, points in series:
+        moments = [moment.astimezone() for moment, _ in points]
+        axis.plot(moments, [float(price) for _, price in points],
+                  marker="o", markersize=3, linewidth=1.6, label=label)
+    if product.monitoring_mode == "target":
+        axis.axhline(float(product.target_price), color="#c0392b", linestyle="--",
+                     linewidth=1.2, label=f"alvo R$ {product.target_price:.2f}")
+    axis.set_title(product.name[:80], fontsize=11)
+    axis.set_ylabel("R$")
+    axis.grid(True, alpha=0.3)
+    axis.yaxis.set_major_formatter(
+        mticker.FuncFormatter(
+            lambda value, _: f"{value:,.2f}".replace(",", "X").replace(".", ",")
+            .replace("X", ".")
         )
-        axis.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
-        axis.legend(fontsize=8, loc="best")
-        figure.autofmt_xdate()
-        figure.tight_layout()
-        buffer = io.BytesIO()
-        figure.savefig(buffer, format="png")
-        return buffer.getvalue()
-    finally:
-        plt.close(figure)
+    )
+    axis.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
+    axis.legend(fontsize=8, loc="best")
+    figure.autofmt_xdate()
+    figure.tight_layout()
+    buffer = io.BytesIO()
+    figure.savefig(buffer, format="png")
+    return buffer.getvalue()

@@ -15,7 +15,7 @@ from .query import SearchQuery
 from .security import UnsafeURL, validate_url
 from .stores.base import StoreAdapter, StoreError
 from .stores.http import request_limited
-from .urls import listing_url
+from .urls import host_matches, listing_url
 
 LOGGER = logging.getLogger(__name__)
 
@@ -184,7 +184,7 @@ class DiscoveryOrchestrator:
             return self.adapters[candidate.store_hint]
         host = urlsplit(safe_url).hostname or ""
         for adapter in self.adapters.values():
-            if any(host == domain or host.endswith(f".{domain}") for domain in adapter.domains):
+            if host_matches(host, adapter.domains):
                 return adapter
         return self.generic_adapter
 

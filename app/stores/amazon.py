@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from ..models import StoreOffer, StoreSearchResult
 from ..pricing import InvalidMoney, parse_money
 from ..security import UnsafeURL, validate_url
+from ..urls import STORE_DOMAINS
 from .base import StoreError, StoreParseError, StoreUnavailable, validate_search_page
 from .http import HTTPStoreAdapter, request_limited
 
@@ -160,8 +161,8 @@ def parse_offer(html: str, url: str) -> StoreOffer:
 
 class AmazonAdapter(HTTPStoreAdapter):
     name = "amazon"
-    product_domains = {"amazon.com.br", "amazon.com"}
-    domains = product_domains | {"a.co"}
+    domains = STORE_DOMAINS["amazon"]
+    product_domains = domains - {"a.co"}
     throttle_retry_delays: tuple[float, ...] = (4, 8)
 
     async def _get_page(self, url: str) -> tuple[str, str]:

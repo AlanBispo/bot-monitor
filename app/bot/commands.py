@@ -1,4 +1,4 @@
-"""Telegram command handlers. Imports Telegram lazily so domain tests need no bot token."""
+"""Telegram command handlers."""
 
 from __future__ import annotations
 
@@ -11,25 +11,28 @@ from decimal import Decimal
 from functools import wraps
 from urllib.parse import urlparse
 
-from .charts import NoChartData, render_price_chart
-from .database import MAX_CHECK_INTERVAL, MIN_CHECK_INTERVAL, Database, DatabaseError
-from .digest import build_daily_summary
-from .discovery import DiscoveryOrchestrator, SearchOutcome
-from .export import history_csv
-from .matching import match_offer, match_product, offer_identity_attributes
-from .pricing import calculate_price, parse_money
-from .query import parse_query
-from .security import UnsafeURL, is_authorized_chat, validate_url
-from .stores.base import StoreAdapter, StoreError, collect_offer
+from ..charts import NoChartData, render_price_chart
+from ..database import MAX_CHECK_INTERVAL, MIN_CHECK_INTERVAL, Database, DatabaseError
+from ..digest import build_daily_summary
+from ..export import history_csv
+from ..matching import match_offer, match_product, offer_identity_attributes
+from ..pricing import calculate_price, parse_money
+from ..query import parse_query
+from ..security import UnsafeURL, validate_url
+from ..stores.base import StoreAdapter, StoreError, collect_offer
+from ..urls import host_matches
+from .buttons import MAX_LIST_BUTTON_PRODUCTS, product_keyboard
+from .formatting import (
+    DATABASE_FAILURE_MESSAGE,
+    format_discovery_results,
+    product_identifier,
+    short_text,
+    split_telegram_text,
+)
 
 MAX_QUERY_LENGTH = 200
 MAX_HISTORY_DAYS = 3650
 LAST_SUMMARY_KEY = "last_daily_summary"
-MAX_LIST_BUTTON_PRODUCTS = 25
-MAX_EXTERNAL_TITLE_LENGTH = 300
-TELEGRAM_TEXT_LIMIT = 4096
-MAX_DISPLAY_URL_LENGTH = 1800
-DATABASE_FAILURE_MESSAGE = "Falha no banco de dados; tente novamente."
 
 
 def command(handler):
@@ -49,46 +52,13 @@ def command(handler):
     return wrapper
 
 
-def product_identifier(raw: str) -> int:
-    try:
-        value = int(raw)
-    except ValueError:
-        raise ValueError("ID de produto inválido") from None
-    if not 0 < value <= 2**63 - 1:
-        raise ValueError("ID de produto inválido")
-    return value
-
-
-def short_text(value: str, limit: int = MAX_EXTERNAL_TITLE_LENGTH) -> str:
-    text = " ".join(value.split())
-    return text if len(text) <= limit else f"{text[: limit - 1]}…"
-
-
-def split_telegram_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
-    """Split long responses at line boundaries, splitting only oversized records."""
-    if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
-    current = ""
-    for record in text.splitlines():
-        if len(record) > limit:
-            if current:
-                chunks.append(current)
-                current = ""
-            while len(record) > limit:
-                chunks.append(record[:limit])
-                record = record[limit:]
-            current = record
-            continue
-        candidate = record if not current else f"{current}\n{record}"
-        if len(candidate) <= limit:
-            current = candidate
-        else:
-            chunks.append(current)
-            current = record
-    if current or not chunks:
-        chunks.append(current)
-    return chunks
+def parse_add_arguments(text: str) -> tuple[Decimal, str]:
+    """Parse `/add_alvo TARGET URL` (also accepted as legacy `/add TARGET URL`)."""
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) != 2:
+        raise ValueError("uso: /add LINK ou /add_alvo 29,90 LINK")
+    target = parse_money(parts[0])
+    return target, parts[1].strip()
 
 
 async def send_daily_summary(database: Database, send) -> None:
@@ -109,123 +79,14 @@ async def send_summary_if_due(database: Database, send, hour: int, minute: int) 
     database.set_state(LAST_SUMMARY_KEY, today)
 
 
-def product_keyboard(products):
-    """Inline actions per product: pause/resume, target, chart and remove."""
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-    rows = []
-    for product in products[:MAX_LIST_BUTTON_PRODUCTS]:
-        toggle = (InlineKeyboardButton(f"⏸ {product.id}", callback_data=f"prd:pause:{product.id}")
-                  if product.active else
-                  InlineKeyboardButton(f"▶ {product.id}", callback_data=f"prd:resume:{product.id}"))
-        rows.append([
-            toggle,
-            InlineKeyboardButton(f"🎯 {product.id}", callback_data=f"prd:target:{product.id}"),
-            InlineKeyboardButton(f"📈 {product.id}", callback_data=f"prd:chart:{product.id}"),
-            InlineKeyboardButton(f"🗑 {product.id}", callback_data=f"prd:remove:{product.id}"),
-        ])
-    return InlineKeyboardMarkup(rows) if rows else None
-
-
-def parse_add_arguments(text: str) -> tuple[Decimal, str]:
-    """Parse `/add_alvo TARGET URL` (also accepted as legacy `/add TARGET URL`)."""
-    parts = text.strip().split(maxsplit=1)
-    if len(parts) != 2:
-        raise ValueError("uso: /add LINK ou /add_alvo 29,90 LINK")
-    target = parse_money(parts[0])
-    return target, parts[1].strip()
-
-
-def format_discovery_results(session_id: str, outcome: SearchOutcome) -> str:
-    coverage = outcome.source_coverage
-    sources = coverage.get("sources", {})
-    completed = [name for name, data in sources.items() if data.get("status") == "completed"]
-    failed = [name for name, data in sources.items() if data.get("status") == "failed"]
-    lines = [
-        f"Busca {session_id} ({outcome.status}); fontes concluídas: "
-        f"{', '.join(completed) or 'nenhuma'}.",
-    ]
-    if failed:
-        lines.append(f"Fontes com falha/timeout: {', '.join(failed)}. Resultado parcial.")
-    lines.append(
-        f"Candidatos: {coverage.get('candidates_discovered', 0)}; "
-        f"validados: {coverage.get('validated', 0)}; "
-        f"falhas de validação: {coverage.get('validation_failed', 0)}; "
-        f"ambíguos: {coverage.get('ambiguous', 0)}; excluídos: {coverage.get('rejected', 0)}."
-    )
-    lines.append(
-        "Selecione: /selecionar SESSAO ID PREÇO_ALVO (ou use um botão); "
-        "para ambíguo, use /confirmar."
-    )
-    lines.append("")
-    if not outcome.results:
-        lines.append("Nenhuma oferta validada.")
-        return "\n".join(lines)
-    for result in outcome.results:
-        if result.pricing is None:
-            price = "sem preço confiável"
-        elif result.pricing.effective_price is not None:
-            price = f"efetivo R$ {result.pricing.effective_price:.2f}"
-            if result.pricing.possible_effective_price is not None:
-                possible = result.pricing.possible_effective_price
-                price += f"; possível R$ {possible:.2f} (condicional)"
-            if result.uncertainty:
-                price += f" ({result.uncertainty})"
-        else:
-            price = (f"produto R$ {result.pricing.product_price:.2f}; "
-                     "frete desconhecido; total não calculável; não é o menor garantido")
-            if result.pricing.possible_effective_price is not None:
-                price += f"; possível R$ {result.pricing.possible_effective_price:.2f}"
-        marker = result.decision.status
-        lines.append(
-            f"{result.short_id}. [{result.offer.store}] "
-            f"{short_text(result.offer.title, 180)} — {price} "
-            f"[{marker}: {result.decision.reason}]\n"
-            f"{short_text(result.offer.url, MAX_DISPLAY_URL_LENGTH)}"
-        )
-    if coverage.get("unknown_shipping"):
-        lines.append(
-            "Ofertas com frete desconhecido foram exibidas, mas não entram "
-            "no menor preço garantido."
-        )
-    return "\n".join(lines)
-
-
-class TelegramBot:
-    def __init__(
-        self,
-        database: Database,
-        adapters: dict[str, StoreAdapter],
-        allowed_chat_id: int,
-        discovery: DiscoveryOrchestrator | None = None,
-        fetch_timeout_seconds: float = 30,
-    ):
-        self.database = database
-        self.adapters = adapters
-        self.allowed_chat_id = allowed_chat_id
-        self.discovery = discovery
-        self.fetch_timeout_seconds = fetch_timeout_seconds
-        self.pending_selection: dict[int, tuple[str, str]] = {}
-        self.pending_target: dict[int, int] = {}
-
-    def authorized(self, update) -> bool:
-        chat = update.effective_chat
-        return (
-            chat is not None
-            and getattr(chat, "type", None) == "private"
-            and is_authorized_chat(chat.id, self.allowed_chat_id)
-        )
-
+class Commands:
     def adapter_for_url(self, safe_url: str) -> StoreAdapter | None:
         hostname = urlparse(safe_url).hostname or ""
         adapter = next(
             (
                 candidate
                 for candidate in self.adapters.values()
-                if any(
-                    hostname == domain or hostname.endswith(f".{domain}")
-                    for domain in candidate.domains
-                )
+                if host_matches(hostname, candidate.domains)
             ),
             None,
         )
@@ -266,13 +127,6 @@ class TelegramBot:
             flags.append("conditional_discount")
         return ",".join(flags) or None
 
-    async def _reject_if_unauthorized(self, update) -> bool:
-        if self.authorized(update):
-            return False
-        if update.effective_message:
-            await update.effective_message.reply_text("Acesso não autorizado.")
-        return True
-
     async def _reply(self, update, text: str, reply_markup=None) -> None:
         chunks = split_telegram_text(text)
         for index, chunk in enumerate(chunks):
@@ -280,14 +134,6 @@ class TelegramBot:
                 await update.effective_message.reply_text(chunk, reply_markup=reply_markup)
             else:
                 await update.effective_message.reply_text(chunk)
-
-    def _authorized_callback(self, query) -> bool:
-        message = query.message if query else None
-        return (
-            message is not None
-            and getattr(getattr(message, "chat", None), "type", None) == "private"
-            and is_authorized_chat(getattr(message, "chat_id", None), self.allowed_chat_id)
-        )
 
     @command
     async def help(self, update, context) -> None:
@@ -525,41 +371,6 @@ class TelegramBot:
     async def confirm(self, update, context) -> None:
         await self.select(update, context, allow_ambiguous=True)
 
-    async def selection_button(self, update, context) -> None:
-        query = update.callback_query
-        if not self._authorized_callback(query):
-            if query:
-                await query.answer("Acesso não autorizado.", show_alert=True)
-            return
-        message = query.message
-        parts = query.data.split(":", 2) if isinstance(query.data, str) else []
-        if len(parts) != 3 or not parts[1] or not parts[2]:
-            await query.answer("Seleção inválida.", show_alert=True)
-            return
-        _, session_id, short_id = parts
-        await query.answer()
-        self.pending_selection.pop(self.allowed_chat_id, None)
-        self.pending_target.pop(self.allowed_chat_id, None)
-        try:
-            entry = self.database.get_search_entry(
-                session_id, short_id, chat_id=self.allowed_chat_id,
-            )
-            if entry.match_status != "matched":
-                raise ValueError("Use /confirmar para uma escolha ambígua.")
-        except (KeyError, ValueError) as exc:
-            await message.reply_text(f"{exc}. Faça uma nova /buscar se a sessão expirou.")
-            return
-        except sqlite3.Error:
-            await message.reply_text(DATABASE_FAILURE_MESSAGE)
-            return
-        self.pending_selection[self.allowed_chat_id] = (session_id, short_id)
-        await message.reply_text(
-            f"Oferta {short_id}: {short_text(entry.title, 180)}. "
-            "Envie somente o preço-alvo (ex.: 99,90), ou /cancelar.\n"
-            "Para anexar a um produto existente, envie:\n"
-            f"/selecionar {session_id} {short_id} PREÇO_ALVO ID_PRODUTO"
-        )
-
     @command
     async def selection_price(self, update, context) -> None:
         product_id = self.pending_target.get(update.effective_chat.id)
@@ -787,64 +598,6 @@ class TelegramBot:
             else "Produto não encontrado ou já pausado."
         )
 
-    async def product_button(self, update, context) -> None:
-        query = update.callback_query
-        if not self._authorized_callback(query):
-            if query:
-                await query.answer("Acesso não autorizado.", show_alert=True)
-            return
-        parts = query.data.split(":") if isinstance(query.data, str) else []
-        if len(parts) != 3 or parts[1] not in {
-            "pause", "resume", "target", "chart", "remove", "confirm_remove", "cancel",
-        }:
-            await query.answer("Ação inválida.", show_alert=True)
-            return
-        await query.answer()
-        message = query.message
-        action = parts[1]
-        try:
-            product = self.database.get_product(product_identifier(parts[2]))
-            if product.removed and action != "cancel":
-                raise KeyError("produto removido")
-            if action == "pause":
-                self.database.deactivate_product(product.id)
-                text = f"⏸ Produto {product.id} pausado. Use ▶ em /lista todos para retomar."
-            elif action == "resume":
-                self.database.reactivate_product(product.id)
-                text = f"▶ Produto {product.id} retomado; histórico preservado."
-            elif action == "target":
-                self.pending_selection.pop(self.allowed_chat_id, None)
-                self.pending_target[self.allowed_chat_id] = product.id
-                text = (f"Envie o novo preço-alvo do produto {product.id} "
-                        f"({short_text(product.name, 120)}), ex.: 99,90 — ou /cancelar.")
-            elif action == "chart":
-                await self._send_chart(message, product, 90)
-                return
-            elif action == "remove":
-                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-                await message.reply_text(
-                    f"Remover o produto {product.id} ({short_text(product.name, 120)}) da lista? "
-                    "O histórico é preservado para /exportar.",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton(
-                            "Sim, remover", callback_data=f"prd:confirm_remove:{product.id}"
-                        ),
-                        InlineKeyboardButton("Cancelar", callback_data=f"prd:cancel:{product.id}"),
-                    ]]),
-                )
-                return
-            elif action == "confirm_remove":
-                self.database.remove_product(product.id)
-                text = f"🗑 Produto {product.id} removido. /reativar {product.id} desfaz."
-            else:
-                text = "Remoção cancelada."
-        except (KeyError, ValueError):
-            text = "Produto não encontrado."
-        except sqlite3.Error:
-            text = DATABASE_FAILURE_MESSAGE
-        await message.reply_text(text)
-
     async def _product_price_history(self, update, product) -> None:
         lines = [
             f"Produto {product.id}: {short_text(product.name)}",
@@ -964,55 +717,3 @@ class TelegramBot:
             f"{count} alerta(s) enviado(s); "
             f"{summary.get('delivery_failed', 0)} falhas de envio."
         )
-
-
-def build_application(
-    database: Database,
-    adapters: dict[str, StoreAdapter],
-    token: str,
-    allowed_chat_id: int,
-    monitor,
-    discovery: DiscoveryOrchestrator | None = None,
-):
-    """Build the PTB application only at runtime, after configuration is validated."""
-    if not token.strip():
-        raise ValueError("TELEGRAM_BOT_TOKEN não configurado")
-    from telegram.ext import (
-        ApplicationBuilder,
-        CallbackQueryHandler,
-        CommandHandler,
-        MessageHandler,
-        filters,
-    )
-
-    bot = TelegramBot(database, adapters, allowed_chat_id, discovery,
-                      getattr(monitor, "fetch_timeout_seconds", 30))
-    application = ApplicationBuilder().token(token).build()
-    application.bot_data["monitor"] = monitor
-    for command, callback in {
-        "help": bot.help,
-        "start": bot.help,
-        "buscar": bot.search,
-        "selecionar": bot.select,
-        "confirmar": bot.confirm,
-        "add": bot.add,
-        "add_alvo": bot.add_target,
-        "anexar": bot.attach,
-        "lista": bot.list_products,
-        "historico": bot.history,
-        "remover": bot.remove,
-        "pausar": bot.pause,
-        "exportar": bot.export,
-        "resumo": bot.summary,
-        "intervalo": bot.set_interval,
-        "alvo": bot.set_target,
-        "reativar": bot.reactivate,
-        "cancelar": bot.cancel_selection,
-        "status": bot.status,
-        "check": bot.check,
-    }.items():
-        application.add_handler(CommandHandler(command, callback))
-    application.add_handler(CallbackQueryHandler(bot.selection_button, pattern=r"^sel:"))
-    application.add_handler(CallbackQueryHandler(bot.product_button, pattern=r"^prd:"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.selection_price))
-    return application

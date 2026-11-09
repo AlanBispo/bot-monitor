@@ -6,6 +6,8 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
+from .urls import host_matches
+
 
 class UnsafeURL(ValueError):
     """Raised when a URL should not be requested by the application."""
@@ -43,9 +45,7 @@ def validate_url(url: str, allowed_domains: set[str] | None = None) -> str:
     ):
         raise UnsafeURL("endereço de rede privada não é permitido")
 
-    if allowed_domains and not any(
-        hostname == domain or hostname.endswith(f".{domain}") for domain in allowed_domains
-    ):
+    if allowed_domains and not host_matches(hostname, allowed_domains):
         raise UnsafeURL("domínio não suportado")
     return parsed.geturl()
 

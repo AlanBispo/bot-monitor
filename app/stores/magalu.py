@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from ..models import StoreOffer, StoreSearchResult
 from ..pricing import InvalidMoney, parse_money
 from ..security import UnsafeURL, validate_url
+from ..urls import STORE_DOMAINS
 from .base import StoreParseError, validate_search_page
 from .http import HTTPStoreAdapter
 from .structured import (
@@ -55,7 +56,7 @@ def parse_offer(html: str, url: str) -> StoreOffer:
 
 class MagaluAdapter(HTTPStoreAdapter):
     name = "magalu"
-    domains = {"magazineluiza.com.br", "magalu.com"}
+    domains = STORE_DOMAINS["magalu"]
 
     async def search(self, query: str):
         html = await self._get(f"https://www.magazineluiza.com.br/busca/{quote_plus(query)}/")

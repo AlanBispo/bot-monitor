@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from urllib.parse import urlsplit
 
 from .alerts import AlertEngine
 from .database import Database
@@ -100,6 +101,12 @@ class Monitor:
             await self._update_store_health(listings, results, send_alert)
             return self.last_run["alerts"]
 
+    @staticmethod
+    def _health_key(listing: Listing) -> str:
+        if listing.store != "generic":
+            return listing.store
+        return (urlsplit(listing.url).hostname or "generic").removeprefix("www.")
+
     async def _update_store_health(self, listings, results, send_alert) -> None:
         """A store fails a cycle only when it could not be reached for any of its listings."""
         reached: set[str] = set()
@@ -108,9 +115,9 @@ class Monitor:
             if not isinstance(result, dict) or listing.store not in self.adapters:
                 continue
             if result["store_error"]:
-                errors.setdefault(listing.store, result["store_error"])
+                errors.setdefault(self._health_key(listing), result["store_error"])
             elif result["checked"]:
-                reached.add(listing.store)
+                reached.add(self._health_key(listing))
         for store in sorted(reached | errors.keys()):
             error = None if store in reached else errors[store]
             transition = self.database.record_store_result(

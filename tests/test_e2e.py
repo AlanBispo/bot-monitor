@@ -8,10 +8,11 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from telegram.ext import CommandHandler
 
 import main
 from app.alerts import AlertEngine, AlertSettings
-from app.bot import TelegramBot, send_daily_summary, send_summary_if_due
+from app.bot import TelegramBot, build_application, send_daily_summary, send_summary_if_due
 from app.database import Database
 from app.discovery import CandidateURL, DiscoveryOrchestrator, DiscoveryProvider
 from app.identity import explicit_attributes
@@ -19,6 +20,7 @@ from app.models import SearchEntry, StoreOffer
 from app.monitor import Monitor, ScheduleSettings
 from app.pricing import InvalidMoney, calculate_price, parse_money
 from app.security import UnsafeURL, validate_url
+from app.settings import Settings
 from app.stores import amazon
 from app.stores.amazon import AmazonAdapter
 from app.stores.base import StoreAdapter, StoreError
@@ -341,6 +343,59 @@ async def test_history_chart_and_excel_safe_export(db):
     await bot.export(response, args(str(product.id)))
     content = response.effective_message.documents[0].decode("utf-8-sig")
     assert "'=HYPERLINK" in content and ";1234,5;" in content
+
+
+async def test_generic_sites_have_independent_health(db, send, sent):
+    class Sites(Shop):
+        name = "generic"
+        domains = set()
+
+        async def get_offer(self, url):
+            if "ruim" in url:
+                raise StoreError("HTTP 500")
+            return await super().get_offer(url)
+
+    for url in ("https://www.ruim.example/a", "https://bom.example/a"):
+        db.register_product_listing("Produto X", Decimal("1"), "generic", url, "Produto X")
+    monitor = Monitor(db, {"generic": Sites()}, AlertEngine(db),
+                      schedule=ScheduleSettings(store_failure_threshold=1))
+    await monitor.check_once(send)
+    assert len(sent) == 1 and "ruim.example falhou" in sent[0]
+
+
+def test_settings_error_names_the_variable(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_ID", "1")
+    monkeypatch.setenv("DAILY_SUMMARY_TIME", "abc")
+    with pytest.raises(ValueError, match="DAILY_SUMMARY_TIME"):
+        Settings.from_env()
+
+
+def test_slow_commands_run_in_background_and_errors_are_handled(db):
+    application = build_application(db, {}, "123:test-token", 123, None)
+    blocking = {
+        name: handler.block
+        for handler in application.handlers[0] if isinstance(handler, CommandHandler)
+        for name in handler.commands
+    }
+    assert not blocking["buscar"] and not blocking["check"] and blocking["lista"]
+    assert application.error_handlers
+
+
+async def test_error_handler_only_notifies_the_authorized_chat(db):
+    messages = []
+
+    async def send_message(chat_id, text):
+        messages.append(chat_id)
+
+    context = SimpleNamespace(
+        error=RuntimeError("x"), bot=SimpleNamespace(send_message=send_message),
+    )
+    bot = TelegramBot(db, {}, 123)
+    await bot.on_error(update(chat_id=999), context)
+    await bot.on_error(None, context)
+    assert messages == []
+    await bot.on_error(update(), context)
+    assert messages == [123]
 
 
 async def test_unauthorized_chat_cannot_control_the_bot(db):

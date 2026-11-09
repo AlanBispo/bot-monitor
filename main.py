@@ -7,12 +7,11 @@ import logging
 import os
 from collections.abc import Iterable
 from datetime import UTC, datetime
-from decimal import Decimal
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
-from app.alerts import AlertEngine, AlertSettings
+from app.alerts import AlertEngine
 from app.bot import build_application, send_summary_if_due
 from app.database import Database
 from app.discovery import (
@@ -20,7 +19,8 @@ from app.discovery import (
     DiscoveryOrchestrator,
     JsonWebDiscoveryProvider,
 )
-from app.monitor import Monitor, ScheduleSettings
+from app.monitor import Monitor
+from app.settings import Settings
 from app.stores.amazon import AmazonAdapter
 from app.stores.generic import GenericStructuredAdapter
 from app.stores.magalu import MagaluAdapter
@@ -61,86 +61,68 @@ def configure_logging(secrets: Iterable[str] = ()) -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
-def required_chat_id() -> int:
-    raw = os.getenv("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
-    try:
-        return int(raw)
-    except ValueError:
-        raise ValueError("TELEGRAM_ALLOWED_CHAT_ID deve ser um número inteiro") from None
-
-
-async def run() -> None:
-    load_dotenv()
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    web_api_key = os.getenv("GENERIC_DISCOVERY_API_KEY", "").strip()
-    configure_logging((token, web_api_key))
-    chat_id = required_chat_id()
-    database = Database(
-        os.getenv("DATABASE_PATH", "data/prices.db"),
-        search_session_max=int(os.getenv("SEARCH_SESSION_MAX", "100")),
-        search_session_max_age_hours=int(os.getenv("SEARCH_SESSION_MAX_AGE_HOURS", "24")),
-    )
-    database.initialize()
-    timeout = float(os.getenv("HTTP_TIMEOUT_SECONDS", "15"))
-    max_response_bytes = int(os.getenv("MAX_RESPONSE_BYTES", "2000000"))
+def build_adapters(settings: Settings) -> dict:
     factories = {
         "amazon": AmazonAdapter, "mercadolivre": MercadoLivreAdapter, "magalu": MagaluAdapter,
     }
-    enabled_stores = {
-        item.strip().casefold()
-        for item in os.getenv("ENABLED_STORES", ",".join(factories)).split(",")
-        if item.strip()
-    }
-    if not enabled_stores or enabled_stores - factories.keys():
-        raise ValueError("ENABLED_STORES contém loja desconhecida ou está vazio")
-    adapters = {
-        name: factories[name](timeout, max_response_bytes) for name in sorted(enabled_stores)
-    }
-    if os.getenv("GENERIC_EXTRACTION_ENABLED", "true").strip().lower() in {"1", "true", "yes"}:
-        adapters["generic"] = GenericStructuredAdapter(
-            timeout, max_response_bytes
-        )
+    limits = (settings.http_timeout, settings.max_response_bytes)
+    adapters = {name: factories[name](*limits) for name in sorted(settings.enabled_stores)}
+    if settings.generic_extraction:
+        adapters["generic"] = GenericStructuredAdapter(*limits)
+    return adapters
+
+
+def build_discovery(settings: Settings, adapters: dict) -> DiscoveryOrchestrator:
     providers = [
         AdapterDiscoveryProvider(adapter)
         for adapter in adapters.values()
         if adapter.name != "generic"
     ]
-    discovery_endpoint = os.getenv("GENERIC_DISCOVERY_ENDPOINT", "").strip()
-    if discovery_endpoint:
+    if settings.discovery_endpoint:
         providers.append(
             JsonWebDiscoveryProvider(
-                discovery_endpoint,
-                api_key=web_api_key or None,
-                max_response_bytes=max_response_bytes,
-                timeout_seconds=timeout,
-                api_format=os.getenv("GENERIC_DISCOVERY_FORMAT", "json"),
+                settings.discovery_endpoint,
+                api_key=settings.discovery_api_key or None,
+                max_response_bytes=settings.max_response_bytes,
+                timeout_seconds=settings.http_timeout,
+                api_format=settings.discovery_format,
             )
         )
-    discovery = DiscoveryOrchestrator(
+    return DiscoveryOrchestrator(
         adapters,
         providers,
-        source_timeout=float(os.getenv("SOURCE_TIMEOUT_SECONDS", str(timeout))),
-        max_candidates=int(os.getenv("MAX_CANDIDATES", "50")),
-        concurrency=int(os.getenv("DISCOVERY_CONCURRENCY", "4")),
+        source_timeout=settings.source_timeout,
+        max_candidates=settings.max_candidates,
+        concurrency=settings.discovery_concurrency,
         generic_adapter=adapters.get("generic"),
     )
-    interval = max(5, int(os.getenv("CHECK_INTERVAL_MINUTES", "30")))
-    schedule = ScheduleSettings(
-        default_minutes=interval,
-        near_target_minutes=max(5, int(os.getenv("CHECK_INTERVAL_NEAR_TARGET_MINUTES", "10"))),
-        near_target_percent=Decimal(os.getenv("NEAR_TARGET_PERCENT", "10")),
-        store_failure_threshold=max(1, int(os.getenv("STORE_FAILURE_ALERT_CYCLES", "3"))),
+
+
+async def run() -> None:
+    load_dotenv()
+    # Before parsing, so that any configuration failure already logs through redaction.
+    configure_logging(
+        os.getenv(name, "").strip()
+        for name in ("TELEGRAM_BOT_TOKEN", "GENERIC_DISCOVERY_API_KEY")
     )
-    alert_settings = AlertSettings(
-        drop_percent=Decimal(os.getenv("PRICE_DROP_ALERT_PERCENT", "15")),
-        daily_summary=os.getenv("DAILY_SUMMARY_ENABLED", "true").strip().lower() != "false",
+    settings = Settings.from_env()
+    chat_id = settings.chat_id
+    database = Database(
+        settings.database_path,
+        search_session_max=settings.search_session_max,
+        search_session_max_age_hours=settings.search_session_max_age_hours,
     )
-    summary_hour, summary_minute = map(int, os.getenv("DAILY_SUMMARY_TIME", "09:00").split(":"))
-    fetch_timeout = float(os.getenv("FETCH_TOTAL_TIMEOUT_SECONDS", "30"))
+    database.initialize()
+    adapters = build_adapters(settings)
+    discovery = build_discovery(settings, adapters)
+    schedule = settings.schedule
     monitor = Monitor(
-        database, adapters, AlertEngine(database, alert_settings), 4, fetch_timeout, schedule,
+        database, adapters, AlertEngine(database, settings.alerts), 4, settings.fetch_timeout,
+        schedule,
     )
-    application = build_application(database, adapters, token, chat_id, monitor, discovery)
+    application = build_application(
+        database, adapters, settings.token, chat_id, monitor, discovery,
+    )
     scheduler = AsyncIOScheduler()
     try:
         async with application:
@@ -163,13 +145,13 @@ async def run() -> None:
                     replace_existing=True,
                     next_run_time=datetime.now(UTC),
                 )
-                if alert_settings.daily_summary:
+                if settings.alerts.daily_summary:
                     # Polling instead of cron: a PC that was off at the set time still catches up.
                     scheduler.add_job(
                         send_summary_if_due,
                         "interval",
                         minutes=MONITOR_TICK_MINUTES,
-                        args=[database, send, summary_hour, summary_minute],
+                        args=[database, send, *settings.summary_time],
                         id="daily-summary",
                         replace_existing=True,
                     )
