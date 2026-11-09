@@ -180,6 +180,52 @@ async def test_mercadolivre_login_wall_reports_and_registers_nothing(db):
     assert db.list_products() == []
 
 
+def catalog_api(items_status=200, calls=None):
+    calls = [] if calls is None else calls
+    offers = [
+        {"price": 3149, "currency_id": "BRL", "condition": "new",
+         "shipping": {"free_shipping": True}},
+        {"price": 2929, "currency_id": "BRL", "condition": "new",
+         "shipping": {"free_shipping": False, "cost": 145.49}},
+        {"price": 100, "currency_id": "BRL", "condition": "used", "shipping": {}},
+    ]
+
+    def handler(request):
+        calls.append(request.url.path)
+        if request.url.path == "/oauth/token":
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 21600})
+        assert request.headers["authorization"] == "Bearer t"
+        if request.url.path.endswith("/items"):
+            return httpx.Response(items_status, json={"results": offers})
+        return httpx.Response(200, json={"name": "Ar Condicionado Midea 12000 Btus"})
+
+    adapter = MercadoLivreAdapter(15, 2_000_000, "id", "fixture")
+    adapter._client = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return adapter, calls
+
+
+CATALOG_URL = "https://www.mercadolivre.com.br/p/MLB123?sid=cart"
+
+
+async def test_mercadolivre_catalog_link_uses_api_and_reuses_token(db):
+    adapter, calls = catalog_api()
+    response = update()
+    await TelegramBot(db, {adapter.name: adapter}, 123).add(response, args(CATALOG_URL))
+    assert "Produto cadastrado" in response.effective_message.replies[0]
+    assert db.list_products()[0].name == "Ar Condicionado Midea 12000 Btus"
+    offer = await adapter.get_offer(CATALOG_URL)
+    assert offer.product_price == Decimal("2929.00") and offer.shipping_price is None
+    assert calls.count("/oauth/token") == 1
+
+
+async def test_mercadolivre_catalog_without_offers_is_unavailable_and_403_is_a_failure():
+    adapter, _ = catalog_api(items_status=404)
+    assert not (await adapter.get_offer(CATALOG_URL)).is_available
+    adapter, _ = catalog_api(items_status=403)
+    with pytest.raises(StoreError, match="HTTP 403"):
+        await adapter.get_offer(CATALOG_URL)
+
+
 def test_amazon_fixtures_parse():
     folder = Path(__file__).parent
     html = (folder / "fixtures_amazon_product.html").read_text(encoding="utf-8")

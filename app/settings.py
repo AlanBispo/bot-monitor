@@ -69,6 +69,8 @@ class Settings:
     alerts: AlertSettings
     summary_time: tuple[int, int]
     backup_keep: int
+    ml_client_id: str
+    ml_client_secret: str
     quiet_hours: tuple[time, time] | None
 
     @classmethod
@@ -103,5 +105,7 @@ class Settings:
             ),
             summary_time=_read("DAILY_SUMMARY_TIME", "09:00", _time),
             backup_keep=_read("BACKUP_KEEP_DAYS", "7", int),
+            ml_client_id=os.getenv("ML_CLIENT_ID", "").strip(),
+            ml_client_secret=os.getenv("ML_CLIENT_SECRET", "").strip(),
             quiet_hours=_read("QUIET_HOURS", "22:00-07:00", _quiet_hours),
         )

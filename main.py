@@ -67,10 +67,14 @@ def configure_logging(secrets: Iterable[str] = ()) -> None:
 
 
 def build_adapters(settings: Settings) -> dict:
-    factories = {
-        "amazon": AmazonAdapter, "mercadolivre": MercadoLivreAdapter, "magalu": MagaluAdapter,
-    }
     limits = (settings.http_timeout, settings.max_response_bytes)
+    factories = {
+        "amazon": AmazonAdapter,
+        "mercadolivre": lambda *args: MercadoLivreAdapter(
+            *args, settings.ml_client_id, settings.ml_client_secret,
+        ),
+        "magalu": MagaluAdapter,
+    }
     adapters = {name: factories[name](*limits) for name in sorted(settings.enabled_stores)}
     if settings.generic_extraction:
         adapters["generic"] = GenericStructuredAdapter(*limits)
@@ -108,7 +112,7 @@ async def run() -> None:
     # Before parsing, so that any configuration failure already logs through redaction.
     configure_logging(
         os.getenv(name, "").strip()
-        for name in ("TELEGRAM_BOT_TOKEN", "GENERIC_DISCOVERY_API_KEY")
+        for name in ("TELEGRAM_BOT_TOKEN", "GENERIC_DISCOVERY_API_KEY", "ML_CLIENT_SECRET")
     )
     settings = Settings.from_env()
     chat_id = settings.chat_id
