@@ -124,6 +124,18 @@ Além do alerta principal (preço-alvo ou queda do produto), produtos com preço
 
 Com `DAILY_SUMMARY_ENABLED=true` (padrão), esses eventos são agrupados num resumo enviado em `DAILY_SUMMARY_TIME` (09:00). Se o PC estiver desligado nesse horário, o resumo do dia sai poucos minutos depois de o monitor voltar. O resumo também traz o preço atual de cada produto, a variação em 24 horas e as lojas com falha. `/resumo` envia o resumo na hora. Com `false`, cada evento é enviado assim que ocorre; se o envio falhar, ele entra no próximo resumo. O alerta de preço-alvo é sempre imediato.
 
+O resumo automático só é enviado quando há novidade ou loja com falha. `/resumo` sempre responde.
+
+### Alertas por produto
+
+Com várias lojas no mesmo produto, o alerta principal fala só da oferta mais barata e não se repete ao trocar de loja sem um preço melhor. Quando outra oferta fica pelo menos 1% mais barata que a líder, o evento "outra loja ficou mais barata" entra no resumo.
+
+Cada alerta traz botões para abrir a oferta, ver o gráfico, pausar e silenciar o produto por 7 dias (a coleta continua; `/reativar ID` encerra antes). Quando há pelo menos 10 observações em 7 dias ou mais, o alerta diz o quanto o preço é bom em relação ao histórico. Títulos com volume ou peso mostram o preço por litro ou quilo.
+
+Para cadastrar pelo celular, basta colar o link no chat: funciona como `/add LINK`.
+
+Em `QUIET_HOURS` (22:00-07:00 por padrão) as mensagens automáticas continuam chegando, mas sem som. O banco é copiado uma vez por dia para `data/backups`, mantendo as últimas `BACKUP_KEEP_DAYS` cópias (7 por padrão).
+
 ### Aviso de loja com falha
 
 Se todas as consultas de uma loja falharem em `STORE_FAILURE_ALERT_CYCLES` ciclos seguidos (3 por padrão), o bot avisa uma única vez e avisa de novo quando a loja voltar a responder. `/status` mostra as lojas com falha e o último erro.
