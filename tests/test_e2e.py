@@ -18,7 +18,7 @@ from app.discovery import CandidateURL, DiscoveryOrchestrator, DiscoveryProvider
 from app.identity import explicit_attributes
 from app.models import SearchEntry, StoreOffer
 from app.monitor import Monitor, ScheduleSettings
-from app.pricing import InvalidMoney, calculate_price, format_brl, parse_money
+from app.pricing import InvalidMoney, calculate_price, format_brl, parse_money, unit_price
 from app.security import UnsafeURL, validate_url
 from app.settings import Settings
 from app.stores import amazon
@@ -449,6 +449,13 @@ def test_token_is_redacted_from_logs():
     record = logging.LogRecord("x", logging.INFO, "", 0, "token %s", ("123:SECRET",), None)
     main.SecretRedactionFilter(["123:SECRET"]).filter(record)
     assert "SECRET" not in record.getMessage()
+
+
+def test_unit_price_uses_measure_and_pack():
+    assert unit_price("Sabão líquido 3L", Decimal("29.90")) == "R$ 9,97/L"
+    assert unit_price("Arroz 500g", Decimal("5")) == "R$ 10,00/kg"
+    assert unit_price("Refrigerante 2L pack com 6 unidades", Decimal("60")) == "R$ 5,00/L"
+    assert unit_price("Celular 128GB", Decimal("1000")) is None
 
 
 def test_pricing_rules():

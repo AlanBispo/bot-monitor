@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..discovery import SearchOutcome
-from ..pricing import format_brl
+from ..pricing import format_brl, unit_price
 
 MAX_EXTERNAL_TITLE_LENGTH = 300
 TELEGRAM_TEXT_LIMIT = 4096
@@ -93,6 +93,12 @@ def format_discovery_results(session_id: str, outcome: SearchOutcome) -> str:
                      "frete desconhecido; total não calculável; não é o menor garantido")
             if result.pricing.possible_effective_price is not None:
                 price += f"; possível {format_brl(result.pricing.possible_effective_price)}"
+        if result.pricing is not None:
+            per_unit = unit_price(
+                result.offer.title,
+                result.pricing.effective_price or result.pricing.product_price,
+            )
+            price += f" ({per_unit})" if per_unit else ""
         marker = result.decision.status
         lines.append(
             f"{result.short_id}. [{result.offer.store}] "
