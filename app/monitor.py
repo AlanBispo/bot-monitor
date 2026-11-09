@@ -93,13 +93,31 @@ class Monitor:
                 "unknown_shipping": sum(
                     isinstance(item, dict) and item["unknown_shipping"] for item in results
                 ),
-                "delivery_failed": sum(
-                    isinstance(item, dict) and item["delivery_failed"] for item in results
-                ),
-                "alerts": sum(item["alerts"] for item in results if isinstance(item, dict)),
+                **await self._process_alerts(results, send_alert),
             }
             await self._update_store_health(listings, results, send_alert)
             return self.last_run["alerts"]
+
+    async def _process_alerts(self, results, send_alert) -> dict[str, int]:
+        """Decide alerts per product once every listing of the cycle has been observed."""
+        observed: dict[int, list] = {}
+        for result in results:
+            if isinstance(result, dict) and result["observed"]:
+                observed.setdefault(result["observed"][0].product_id, []).append(result["observed"])
+        totals = {"alerts": 0, "delivery_failed": 0}
+        for product_id, items in observed.items():
+            product = self.database.get_product(product_id)
+            for step in (
+                self.alert_engine.process_product_events, self.alert_engine.process_best_offer,
+            ):
+                try:
+                    totals["alerts"] += await step(product, items, send_alert)
+                except Exception as exc:
+                    LOGGER.warning(
+                        "falha de entrega no produto %s: %s", product_id, type(exc).__name__,
+                    )
+                    totals["delivery_failed"] += 1
+        return totals
 
     @staticmethod
     def _health_key(listing: Listing) -> str:
@@ -140,7 +158,7 @@ class Monitor:
 
     async def _check_listing(self, listing, send_alert) -> dict:
         result = {"checked": 0, "failed": 0, "unknown_shipping": 0,
-                  "delivery_failed": 0, "alerts": 0, "store_error": None}
+                  "store_error": None, "observed": None}
         adapter = self.adapters.get(listing.store)
         try:
             if adapter is None:
@@ -193,24 +211,7 @@ class Monitor:
             result["checked"] = 1
             if pricing.shipping_price is None:
                 result["unknown_shipping"] = 1
-            try:
-                result["alerts"] += await self.alert_engine.process_events(
-                    product, listing, snapshot, previous, send_alert,
-                )
-            except Exception as exc:
-                LOGGER.warning("falha de entrega no listing %s: %s", listing.id, type(exc).__name__)
-                result["delivery_failed"] = 1
-            if pricing.effective_price is None and product.monitoring_mode == "target":
-                LOGGER.warning("frete desconhecido no listing %s; alerta não avaliado", listing.id)
-                self.database.cancel_pending_alert(listing.id)
-                return result
-            try:
-                result["alerts"] += int(
-                    await self.alert_engine.process(product, listing, snapshot, send_alert)
-                )
-            except Exception as exc:
-                LOGGER.warning("falha de entrega no listing %s: %s", listing.id, type(exc).__name__)
-                result["delivery_failed"] = 1
+            result["observed"] = (listing, snapshot, previous)
             return result
         except (StoreError, InvalidMoney, InvalidQuery, ValueError) as exc:
             LOGGER.warning("falha ao consultar listing %s: %s", listing.id, str(exc))

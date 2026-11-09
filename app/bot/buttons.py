@@ -8,6 +8,7 @@ from ..security import is_authorized_chat
 from .formatting import DATABASE_FAILURE_MESSAGE, product_identifier, short_text
 
 MAX_LIST_BUTTON_PRODUCTS = 25
+SNOOZE_DAYS = 7
 
 
 def product_keyboard(products):
@@ -26,6 +27,21 @@ def product_keyboard(products):
             InlineKeyboardButton(f"🗑 {product.id}", callback_data=f"prd:remove:{product.id}"),
         ])
     return InlineKeyboardMarkup(rows) if rows else None
+
+
+def alert_keyboard(url: str, product_id: int):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛒 Abrir oferta", url=url)],
+        [
+            InlineKeyboardButton("📈 Gráfico", callback_data=f"prd:chart:{product_id}"),
+            InlineKeyboardButton("⏸ Pausar", callback_data=f"prd:pause:{product_id}"),
+            InlineKeyboardButton(
+                f"💤 {SNOOZE_DAYS} dias", callback_data=f"prd:snooze:{product_id}",
+            ),
+        ],
+    ])
 
 
 class Buttons:
@@ -80,7 +96,7 @@ class Buttons:
             return
         parts = query.data.split(":") if isinstance(query.data, str) else []
         if len(parts) != 3 or parts[1] not in {
-            "pause", "resume", "target", "chart", "remove", "confirm_remove", "cancel",
+            "pause", "resume", "target", "chart", "remove", "confirm_remove", "cancel", "snooze",
         }:
             await query.answer("Ação inválida.", show_alert=True)
             return
@@ -94,6 +110,11 @@ class Buttons:
             if action == "pause":
                 self.database.deactivate_product(product.id)
                 text = f"⏸ Produto {product.id} pausado. Use ▶ em /lista todos para retomar."
+            elif action == "snooze":
+                until = self.database.snooze_product(product.id, SNOOZE_DAYS)
+                text = (f"💤 Produto {product.id} sem alertas até "
+                        f"{until.astimezone().strftime('%d/%m')}; o histórico continua. "
+                        f"/reativar {product.id} encerra antes.")
             elif action == "resume":
                 self.database.reactivate_product(product.id)
                 text = f"▶ Produto {product.id} retomado; histórico preservado."

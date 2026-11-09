@@ -7,7 +7,7 @@ import io
 import json
 import re
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from functools import wraps
 from types import SimpleNamespace
@@ -31,6 +31,7 @@ from .formatting import (
     short_text,
     split_telegram_text,
 )
+from .sender import make_sender
 
 MAX_QUERY_LENGTH = 200
 MAX_HISTORY_DAYS = 3650
@@ -486,6 +487,8 @@ class Commands:
             lines.append(
                 f"{product.id}. {short_text(product.name)} — {mode}{interval}"
                 + (" [pausado]" if not product.active else "")
+                + (f" [sem alertas até {product.snoozed_until.astimezone().strftime('%d/%m')}]"
+                   if product.snoozed_until and product.snoozed_until > datetime.now(UTC) else "")
             )
             for listing in listings:
                 if listing.product_id == product.id and listing.active:
@@ -722,7 +725,7 @@ class Commands:
             await update.effective_message.reply_text("Monitor indisponível.")
             return
         count = await monitor.check_once(
-            lambda message: context.bot.send_message(self.allowed_chat_id, message)
+            make_sender(context.bot, self.allowed_chat_id, self.quiet_hours)
         )
         summary = getattr(monitor, "last_run", {})
         await update.effective_message.reply_text(

@@ -10,9 +10,10 @@ from ..security import is_authorized_chat
 from ..stores.base import StoreAdapter
 from .buttons import Buttons
 from .commands import Commands, send_daily_summary, send_summary_if_due
+from .sender import make_sender
 
 __all__ = [
-    "TelegramBot", "build_application", "register_commands", "send_daily_summary",
+    "TelegramBot", "build_application", "make_sender", "register_commands", "send_daily_summary",
     "send_summary_if_due",
 ]
 
@@ -50,12 +51,14 @@ class TelegramBot(Commands, Buttons):
         allowed_chat_id: int,
         discovery: DiscoveryOrchestrator | None = None,
         fetch_timeout_seconds: float = 30,
+        quiet_hours=None,
     ):
         self.database = database
         self.adapters = adapters
         self.allowed_chat_id = allowed_chat_id
         self.discovery = discovery
         self.fetch_timeout_seconds = fetch_timeout_seconds
+        self.quiet_hours = quiet_hours
         self.pending_selection: dict[int, tuple[str, str]] = {}
         self.pending_target: dict[int, int] = {}
 
@@ -94,6 +97,7 @@ def build_application(
     allowed_chat_id: int,
     monitor,
     discovery: DiscoveryOrchestrator | None = None,
+    quiet_hours=None,
 ):
     """Build the PTB application only at runtime, after configuration is validated."""
     if not token.strip():
@@ -107,7 +111,7 @@ def build_application(
     )
 
     bot = TelegramBot(database, adapters, allowed_chat_id, discovery,
-                      getattr(monitor, "fetch_timeout_seconds", 30))
+                      getattr(monitor, "fetch_timeout_seconds", 30), quiet_hours)
     application = ApplicationBuilder().token(token).build()
     application.bot_data["monitor"] = monitor
     application.add_error_handler(bot.on_error)

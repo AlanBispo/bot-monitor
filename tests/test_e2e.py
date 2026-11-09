@@ -1,7 +1,7 @@
 """End-to-end flows: Telegram handlers, monitor and SQLite, with only the network faked."""
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,8 +11,15 @@ import pytest
 from telegram.ext import CommandHandler
 
 import main
-from app.alerts import AlertEngine, AlertSettings
-from app.bot import TelegramBot, build_application, send_daily_summary, send_summary_if_due
+from app.alerts import AlertActions, AlertEngine, AlertSettings
+from app.bot import (
+    TelegramBot,
+    build_application,
+    make_sender,
+    send_daily_summary,
+    send_summary_if_due,
+)
+from app.bot.sender import is_quiet
 from app.database import Database
 from app.discovery import CandidateURL, DiscoveryOrchestrator, DiscoveryProvider
 from app.identity import explicit_attributes
@@ -119,7 +126,7 @@ def sent():
 
 @pytest.fixture
 def send(sent):
-    async def deliver(message):
+    async def deliver(message, actions=None):
         sent.append(message)
 
     return deliver
@@ -421,6 +428,71 @@ async def test_pasted_link_registers_product_and_clears_pending_edit(db):
     assert "Produto cadastrado" in response.effective_message.replies[0]
     assert not bot.pending_target
     assert db.list_listings()[-1].url == URL
+
+
+class TwoStores(Shop):
+    def __init__(self, prices):
+        super().__init__()
+        self.prices = prices
+
+    async def get_offer(self, url):
+        return StoreOffer("shop", "Produto X", url, Decimal(self.prices[url]), Decimal("0"))
+
+
+async def test_product_alerts_only_cheapest_store_and_reports_new_leader(db, send, sent):
+    product, first = register(db, target="200", url=URL + "/a")
+    second = db.add_listing(product.id, "shop", URL + "/b", "Produto X")
+    shop = TwoStores({first.url: "100", second.url: "102"})
+    monitor = Monitor(db, {"shop": shop}, AlertEngine(db))
+    assert await monitor.check_once(send) == 1
+    assert len(sent) == 1 and first.url in sent[0]
+    assert db.queued_alerts() == []
+
+    shop.prices[second.url] = "99.50"
+    await monitor.check_once(send)
+    assert db.queued_alerts() == []
+
+    shop.prices[second.url] = "90"
+    assert await monitor.check_once(send) == 1
+    assert second.url in sent[-1]
+    assert [alert.alert_type for alert in db.queued_alerts()] == ["CHEAPER_STORE"]
+
+
+async def test_alert_says_how_good_the_price_is(db, send, sent):
+    _, listing = register(db, target="70")
+    for day in range(1, 13):
+        observe(db, listing.id, str(100 + day), days_ago=day)
+    await Monitor(db, {"shop": Shop("60")}, AlertEngine(db)).check_once(send)
+    assert "entre os 10% menores" in sent[0]
+
+
+async def test_snooze_silences_alerts_but_keeps_collecting(db, send, sent):
+    product, listing = register(db, target="200")
+    bot = TelegramBot(db, {}, 123)
+    await bot.product_button(tap(f"prd:snooze:{product.id}")[0], None)
+    await Monitor(db, {"shop": Shop()}, AlertEngine(db)).check_once(send)
+    assert sent == [] and len(db.history(listing.id)) == 1
+    db.reactivate_product(product.id)
+    await Monitor(db, {"shop": Shop()}, AlertEngine(db)).check_once(send)
+    assert len(sent) == 1
+
+
+async def test_sender_adds_alert_buttons_and_silences_quiet_hours():
+    calls = []
+
+    async def send_message(chat_id, text, **kwargs):
+        calls.append(kwargs)
+
+    bot = SimpleNamespace(send_message=send_message)
+    always = (time(0, 0), time(23, 59, 59, 999999))
+    await make_sender(bot, 1, always)("oi", AlertActions(URL, 7))
+    assert calls[0]["disable_notification"] is True
+    rows = calls[0]["reply_markup"].inline_keyboard
+    assert rows[0][0].url == URL and rows[1][2].callback_data == "prd:snooze:7"
+    await make_sender(bot, 1, None)("oi")
+    assert calls[1]["disable_notification"] is False
+    assert is_quiet(time(23, 0), (time(22, 0), time(7, 0)))
+    assert not is_quiet(time(12, 0), (time(22, 0), time(7, 0)))
 
 
 async def test_unauthorized_chat_cannot_control_the_bot(db):

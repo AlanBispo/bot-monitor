@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import time
 from decimal import Decimal
 from typing import TypeVar
 
@@ -30,6 +31,13 @@ def _flag(name: str, default: str) -> bool:
 def _time(raw: str) -> tuple[int, int]:
     hour, minute = (int(part) for part in raw.split(":"))
     return hour, minute
+
+
+def _quiet_hours(raw: str) -> tuple[time, time] | None:
+    if not raw:
+        return None
+    start, end = raw.split("-")
+    return time(*_time(start)), time(*_time(end))
 
 
 def _stores(raw: str) -> frozenset[str]:
@@ -61,6 +69,7 @@ class Settings:
     alerts: AlertSettings
     summary_time: tuple[int, int]
     backup_keep: int
+    quiet_hours: tuple[time, time] | None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -94,4 +103,5 @@ class Settings:
             ),
             summary_time=_read("DAILY_SUMMARY_TIME", "09:00", _time),
             backup_keep=_read("BACKUP_KEEP_DAYS", "7", int),
+            quiet_hours=_read("QUIET_HOURS", "22:00-07:00", _quiet_hours),
         )

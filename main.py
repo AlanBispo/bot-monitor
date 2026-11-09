@@ -12,7 +12,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
 from app.alerts import AlertEngine
-from app.bot import build_application, register_commands, send_summary_if_due
+from app.bot import (
+    build_application,
+    make_sender,
+    register_commands,
+    send_summary_if_due,
+)
 from app.database import Database
 from app.discovery import (
     AdapterDiscoveryProvider,
@@ -121,7 +126,7 @@ async def run() -> None:
         schedule,
     )
     application = build_application(
-        database, adapters, settings.token, chat_id, monitor, discovery,
+        database, adapters, settings.token, chat_id, monitor, discovery, settings.quiet_hours,
     )
     scheduler = AsyncIOScheduler()
     try:
@@ -131,8 +136,7 @@ async def run() -> None:
                 await application.updater.start_polling(
                     allowed_updates=["message", "callback_query"]
                 )
-                def send(message):
-                    return application.bot.send_message(chat_id, message)
+                send = make_sender(application.bot, chat_id, settings.quiet_hours)
 
                 # Short ticks; each listing is checked only when its own interval is due.
                 scheduler.add_job(

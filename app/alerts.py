@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from .database import Database
 from .models import Alert, Listing, PriceSnapshot, Product
-from .pricing import format_brl
+from .pricing import format_brl, unit_price
 
 LOGGER = logging.getLogger(__name__)
 
@@ -19,14 +19,27 @@ DROP_WINDOW_DAYS = 7
 LOW_WINDOW_DAYS = 90
 # A "lowest in N days" claim needs history that actually spans a meaningful period.
 LOW_MIN_HISTORY_DAYS = 7
+RATING_MIN_SAMPLES = 10
+# A new cheapest offer must beat the previous one by this share to be reported.
+LEADER_MARGIN = Decimal("0.01")
 LOW_PRICE = "LOW_PRICE"
 PERCENT_DROP = "PERCENT_DROP"
 BACK_IN_STOCK = "BACK_IN_STOCK"
+CHEAPER_STORE = "CHEAPER_STORE"
 EVENT_LABELS = {
     LOW_PRICE: "📉 Menor preço do período",
     PERCENT_DROP: "🔻 Queda percentual",
     BACK_IN_STOCK: "📦 Voltou ao estoque",
+    CHEAPER_STORE: "🏷️ Outra loja ficou mais barata",
 }
+
+
+@dataclass(frozen=True)
+class AlertActions:
+    """What the delivery layer can offer next to an alert."""
+
+    url: str
+    product_id: int
 
 
 @dataclass(frozen=True)
@@ -51,34 +64,113 @@ class AlertEngine:
         self.settings = settings or AlertSettings()
         self._lock = asyncio.Lock()
 
-    async def process_events(
-        self,
-        product: Product,
-        listing: Listing,
-        snapshot: PriceSnapshot,
-        previous: PriceSnapshot | None,
-        send: Callable[[str], Awaitable[None]],
-    ) -> int:
-        """Evaluate secondary alerts for a new available observation.
+    def _snoozed(self, product: Product) -> bool:
+        return bool(product.snoozed_until and product.snoozed_until > datetime.now(UTC))
 
-        Events are recorded before delivery, so a failed immediate send is not lost: it stays
-        queued and appears in the next daily summary.
-        """
-        if not snapshot.available or snapshot.product_price is None:
+    async def process_best_offer(self, product: Product, observed, send) -> int:
+        """Run the main alert only for the cheapest offer among the ones just observed."""
+        offers = self.database.current_offers(product.id)
+        if product.monitoring_mode == "target":
+            offers = [offer for offer in offers if offer[1].effective_price is not None]
+            best = min(offers, key=lambda offer: offer[1].effective_price, default=None)
+        else:
+            best = min(offers, key=lambda offer: offer[1].product_price, default=None)
+        count = 0
+        for listing, snapshot, _ in observed:
+            if self._snoozed(product) or best is None or listing.id != best[0].id:
+                self.database.cancel_pending_alert(listing.id)
+            else:
+                count += int(await self.process(product, listing, snapshot, send))
+        return count
+
+    async def process_product_events(self, product: Product, observed, send) -> int:
+        """Evaluate secondary alerts, recorded before delivery so a failed send is not lost."""
+        if self._snoozed(product):
             return 0
+        count = 0
         async with self._lock:
-            events = self._events(product, listing, snapshot, previous)
-            alerts = [
-                self.database.add_queued_alert(listing.id, kind, snapshot.product_price, ref)
-                for kind, ref, _ in events
-            ]
-            if not alerts or self.settings.daily_summary:
-                return 0
-            await send(format_event_alert(product, listing, snapshot, events))
-            self.database.mark_alerts_sent([alert.id for alert in alerts])
-            return 1
+            offers = self.database.current_offers(product.id)
+            cheapest = min(offers, key=lambda offer: offer[1].product_price, default=None)
+            found: dict[int, tuple] = {}
+            for listing, snapshot, previous in observed:
+                is_cheapest = cheapest is not None and cheapest[0].id == listing.id
+                events = self._events(product, listing, snapshot, previous, is_cheapest)
+                if events:
+                    found[listing.id] = (listing, snapshot, events)
+            change = self._leader_change(product, offers, cheapest)
+            if change:
+                entry = found.setdefault(cheapest[0].id, (*cheapest, []))
+                entry[2].append(change)
+            for listing, snapshot, events in found.values():
+                alerts = [
+                    self.database.add_queued_alert(
+                        listing.id, kind, snapshot.product_price, reference,
+                    )
+                    for kind, reference, _ in events
+                ]
+                if self.settings.daily_summary:
+                    continue
+                notes = self._notes(product, listing, snapshot)
+                await send(
+                    format_event_alert(product, listing, snapshot, events, notes),
+                    AlertActions(listing.url, product.id),
+                )
+                self.database.mark_alerts_sent([alert.id for alert in alerts])
+                count += 1
+        return count
 
-    def _events(self, product, listing, snapshot, previous) -> list[tuple[str, Decimal, str]]:
+    def _leader_change(self, product, offers, cheapest) -> tuple[str, Decimal, str] | None:
+        """Report a new cheapest offer once; small differences do not change the leader."""
+        if len(offers) < 2:
+            return None
+        key = f"leader:{product.id}"
+        stored = self.database.get_state(key)
+        prices = {listing.id: (listing, snap.product_price) for listing, snap in offers}
+        winner, winner_price = cheapest[0], cheapest[1].product_price
+        if stored is None or int(stored) not in prices:
+            self.database.set_state(key, str(winner.id))
+            return None
+        leader, leader_price = prices[int(stored)]
+        if leader.id == winner.id or winner_price > leader_price * (1 - LEADER_MARGIN):
+            return None
+        self.database.set_state(key, str(winner.id))
+        return CHEAPER_STORE, leader_price, f"antes {leader.store} a {format_brl(leader_price)}"
+
+    def _notes(self, product, listing, snapshot) -> list[str]:
+        price = snapshot.effective_price or snapshot.product_price
+        notes = []
+        per_unit = unit_price(listing.title, price)
+        if per_unit:
+            notes.append(f"Por unidade: {per_unit}")
+        rating = self._rating(product, snapshot)
+        if rating:
+            notes.append(rating)
+        return notes
+
+    def _rating(self, product, snapshot) -> str | None:
+        """Place the price within the product history, when there is enough of it."""
+        now = datetime.now(UTC)
+        rows = [
+            row for row in self.database.product_history(
+                product.id, now - timedelta(days=LOW_WINDOW_DAYS),
+            )
+            if row.id != snapshot.id and row.available and row.product_price is not None
+        ]
+        prices = [row.product_price for row in rows]
+        days = (now - rows[0].captured_at).days if rows else 0
+        if len(prices) < RATING_MIN_SAMPLES or days < LOW_MIN_HISTORY_DAYS:
+            return None
+        if min(prices) == max(prices):
+            return None
+        at_or_below = sum(price <= snapshot.product_price for price in prices)
+        for percent, label in ((10, "Preço ótimo"), (25, "Preço bom"), (50, "Preço razoável")):
+            if at_or_below * 100 <= percent * len(prices):
+                return f"💡 {label}: entre os {percent}% menores dos últimos {days} dias"
+        return f"💡 Preço comum: acima da metade dos últimos {days} dias"
+
+    def _events(
+        self, product, listing, snapshot, previous, is_cheapest: bool,
+    ) -> list[tuple[str, Decimal, str]]:
         price = snapshot.product_price
         events: list[tuple[str, Decimal, str]] = []
         if previous is not None and not previous.available:
@@ -91,8 +183,8 @@ class AlertEngine:
             if last_price:
                 detail = f"último preço antes de esgotar: {format_brl(last_price)}"
             events.append((BACK_IN_STOCK, last_price or price, detail))
-        # Price-drop products already alert on every new low; avoid duplicate messages.
-        if product.monitoring_mode != "target":
+        # Price-drop products already alert on every new low, and only the cheapest offer counts.
+        if product.monitoring_mode != "target" or not is_cheapest:
             return events
         now = datetime.now(UTC)
         settings = self.settings
@@ -144,7 +236,7 @@ class AlertEngine:
             if pending and pending.target_price != product.target_price:
                 self.database.cancel_pending_alert(listing.id)
                 pending = None
-            previous = self.database.last_alert(listing.id, "TARGET_REACHED")
+            previous = self.database.last_product_alert(product.id, "TARGET_REACHED")
             if pending is None and previous and previous.target_price == product.target_price and (
                 snapshot.effective_price >= previous.price
             ):
@@ -158,15 +250,17 @@ class AlertEngine:
                 )
                 if not reentered:
                     return False
-            message = format_target_alert(product, listing, snapshot)
+            message = format_target_alert(
+                product, listing, snapshot, self._notes(product, listing, snapshot),
+            )
             alert = self.database.add_alert(
                 listing.id, "TARGET_REACHED", snapshot.effective_price, product.target_price,
             )
-            return await self._deliver(alert, message, send)
+            return await self._deliver(alert, message, send, listing)
 
-    async def _deliver(self, alert, message, send) -> bool:
+    async def _deliver(self, alert, message, send, listing) -> bool:
         # Failure or cancellation leaves the pending row for the next observation.
-        await send(message)
+        await send(message, AlertActions(listing.url, listing.product_id))
         self.database.mark_alert_sent(alert.id)
         LOGGER.info("alerta %s enviado para listing %s", alert.alert_type, alert.listing_id)
         return True
@@ -183,7 +277,7 @@ class AlertEngine:
         )
         if baseline is None:
             return False
-        previous = self.database.last_alert(listing.id, "PRICE_DROP")
+        previous = self.database.last_product_alert(product.id, "PRICE_DROP")
         reference = min(baseline, previous.price) if previous else baseline
         if snapshot.product_price >= reference:
             self.database.cancel_pending_alert(listing.id)
@@ -193,12 +287,21 @@ class AlertEngine:
         )
         return await self._deliver(
             alert,
-            format_drop_alert(product, listing, snapshot, reference), send,
+            format_drop_alert(
+                product, listing, snapshot, reference, self._notes(product, listing, snapshot),
+            ),
+            send,
+            listing,
         )
+
+
+def _note_lines(notes: list[str]) -> str:
+    return "".join(f"{note}\n" for note in notes)
 
 
 def format_drop_alert(
     product: Product, listing: Listing, snapshot: PriceSnapshot, reference: Decimal,
+    notes: list[str],
 ) -> str:
     shipping = (
         "desconhecido (total com frete não confirmado)"
@@ -209,18 +312,21 @@ def format_drop_alert(
         f"Referência anterior: {format_brl(reference)}\n"
         f"Agora: {format_brl(snapshot.product_price)}\n"
         f"Queda: {format_brl(reference - snapshot.product_price)}\nFrete: {shipping}\n"
-        f"Comparação do preço do produto, sem frete e sem cupons condicionais.\n{listing.url}"
+        f"Comparação do preço do produto, sem frete e sem cupons condicionais.\n"
+        f"{_note_lines(notes)}{listing.url}"
     )
 
 
 def format_event_alert(
     product: Product, listing: Listing, snapshot: PriceSnapshot,
     events: list[tuple[str, Decimal, str]],
+    notes: list[str],
 ) -> str:
     lines = [f"{product.name}", f"Loja: {listing.store}",
              f"Preço do produto: {format_brl(snapshot.product_price)} (sem frete)"]
     for kind, _, detail in events:
         lines.append(f"{EVENT_LABELS[kind]}" + (f": {detail}" if detail else ""))
+    lines.extend(notes)
     lines.append(listing.url)
     return "\n".join(lines)
 
@@ -233,12 +339,15 @@ def describe_queued_alert(alert: Alert) -> str:
     return f"{label}: {format_brl(alert.target_price)} → {format_brl(alert.price)}"
 
 
-def format_target_alert(product: Product, listing: Listing, snapshot: PriceSnapshot) -> str:
+def format_target_alert(
+    product: Product, listing: Listing, snapshot: PriceSnapshot, notes: list[str],
+) -> str:
     shipping = (
         "desconhecido" if snapshot.shipping_price is None else format_brl(snapshot.shipping_price)
     )
     return (
         f"🎯 Preço-alvo atingido\n{product.name}\n"
         f"Loja: {listing.store}\nPreço efetivo: {format_brl(snapshot.effective_price)}\n"
-        f"Produto: {format_brl(snapshot.product_price)}\nFrete: {shipping}\n{listing.url}"
+        f"Produto: {format_brl(snapshot.product_price)}\nFrete: {shipping}\n"
+        f"{_note_lines(notes)}{listing.url}"
     )

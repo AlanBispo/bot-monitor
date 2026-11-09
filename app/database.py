@@ -98,7 +98,8 @@ class Database:
                     source_query TEXT,
                     monitoring_mode TEXT NOT NULL DEFAULT 'target',
                     check_interval_minutes INTEGER,
-                    removed_at TEXT
+                    removed_at TEXT,
+                    snoozed_until TEXT
                 );
                 CREATE TABLE IF NOT EXISTS listings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -193,6 +194,13 @@ class Database:
                     ON alerts(listing_id, alert_type) WHERE status = 'pending';
                 """
             )
+            self._ensure_column(connection, "products", "snoozed_until", "TEXT")
+
+    @staticmethod
+    def _ensure_column(connection, table: str, column: str, definition: str) -> None:
+        columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def register_product_listing(
         self,
@@ -330,6 +338,15 @@ class Database:
             )
         return True
 
+    def snooze_product(self, product_id: int, days: int) -> datetime:
+        until = datetime.now(UTC) + timedelta(days=days)
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE products SET snoozed_until = ?, updated_at = ? WHERE id = ?",
+                (until.isoformat(timespec="microseconds"), utc_now(), product_id),
+            )
+        return until
+
     def set_check_interval(self, product_id: int, minutes: int | None) -> Product:
         if minutes is not None and not MIN_CHECK_INTERVAL <= minutes <= MAX_CHECK_INTERVAL:
             raise ValueError(
@@ -366,7 +383,8 @@ class Database:
         self.get_product(product_id)
         with self.connection() as connection:
             connection.execute(
-                "UPDATE products SET active = 1, removed_at = NULL, updated_at = ? WHERE id = ?",
+                """UPDATE products SET active = 1, removed_at = NULL, snoozed_until = NULL,
+                   updated_at = ? WHERE id = ?""",
                 (utc_now(), product_id),
             )
             connection.execute(
@@ -724,6 +742,27 @@ class Database:
             ).fetchone()
         return None if row is None else self._alert(row)
 
+    def last_product_alert(self, product_id: int, alert_type: str) -> Alert | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """SELECT a.* FROM alerts a JOIN listings l ON l.id = a.listing_id
+                   WHERE l.product_id = ? AND a.alert_type = ? AND a.status = 'sent'
+                   ORDER BY a.sent_at DESC, a.id DESC LIMIT 1""",
+                (product_id, alert_type),
+            ).fetchone()
+        return None if row is None else self._alert(row)
+
+    def current_offers(self, product_id: int) -> list[tuple[Listing, PriceSnapshot]]:
+        """Active listings of a product whose latest check confirmed an available price."""
+        offers = []
+        for listing in self.list_listings(active_only=True, confirmed_only=True):
+            if listing.product_id != product_id or listing.last_error:
+                continue
+            snapshot = self.latest_snapshot(listing.id)
+            if snapshot and snapshot.available and snapshot.product_price is not None:
+                offers.append((listing, snapshot))
+        return offers
+
     def add_queued_alert(
         self, listing_id: int, alert_type: str, price: Decimal, reference: Decimal
     ) -> Alert:
@@ -888,6 +927,7 @@ class Database:
             row["monitoring_mode"],
             row["check_interval_minutes"],
             row["removed_at"] is not None,
+            as_datetime(row["snoozed_until"]) if row["snoozed_until"] else None,
         )
 
     @staticmethod

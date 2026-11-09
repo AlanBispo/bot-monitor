@@ -53,6 +53,7 @@ class Product:
     # None means automatic: shorter interval near the target, default interval otherwise.
     check_interval_minutes: int | None = None
     removed: bool = False
+    snoozed_until: datetime | None = None
 
 
 @dataclass(frozen=True)
