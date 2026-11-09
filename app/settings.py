@@ -60,6 +60,7 @@ class Settings:
     schedule: ScheduleSettings
     alerts: AlertSettings
     summary_time: tuple[int, int]
+    backup_keep: int
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -92,4 +93,5 @@ class Settings:
                 daily_summary=_flag("DAILY_SUMMARY_ENABLED", "true"),
             ),
             summary_time=_read("DAILY_SUMMARY_TIME", "09:00", _time),
+            backup_keep=_read("BACKUP_KEEP_DAYS", "7", int),
         )

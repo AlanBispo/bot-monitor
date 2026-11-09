@@ -78,7 +78,11 @@ async def send_summary_if_due(database: Database, send, hour: int, minute: int) 
     today = now.date().isoformat()
     if (now.hour, now.minute) < (hour, minute) or database.get_state(LAST_SUMMARY_KEY) == today:
         return
-    await send_daily_summary(database, send)
+    # Nothing to report: count the day as done without sending a message.
+    if database.queued_alerts() or any(
+        health.consecutive_failures for health in database.store_health()
+    ):
+        await send_daily_summary(database, send)
     database.set_state(LAST_SUMMARY_KEY, today)
 
 

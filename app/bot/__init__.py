@@ -11,11 +11,35 @@ from ..stores.base import StoreAdapter
 from .buttons import Buttons
 from .commands import Commands, send_daily_summary, send_summary_if_due
 
-__all__ = ["TelegramBot", "build_application", "send_daily_summary", "send_summary_if_due"]
+__all__ = [
+    "TelegramBot", "build_application", "register_commands", "send_daily_summary",
+    "send_summary_if_due",
+]
 
 LOGGER = logging.getLogger(__name__)
 # Slow network commands must not hold up the other commands while they run.
 BACKGROUND_COMMANDS = {"buscar", "check"}
+COMMAND_MENU = (
+    ("lista", "Produtos monitorados"),
+    ("buscar", "Procurar um produto"),
+    ("add", "Monitorar um link"),
+    ("add_alvo", "Monitorar um link com preço-alvo"),
+    ("check", "Verificar preços agora"),
+    ("resumo", "Enviar o resumo agora"),
+    ("status", "Situação das lojas e ofertas"),
+    ("exportar", "Baixar o histórico em CSV"),
+    ("help", "Todos os comandos"),
+)
+
+
+async def register_commands(bot) -> None:
+    """Fill Telegram's command menu; the bot works normally if this fails."""
+    from telegram import BotCommand
+
+    try:
+        await bot.set_my_commands([BotCommand(*item) for item in COMMAND_MENU])
+    except Exception as exc:
+        LOGGER.warning("falha ao registrar o menu de comandos: %s", type(exc).__name__)
 
 
 class TelegramBot(Commands, Buttons):

@@ -12,7 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
 from app.alerts import AlertEngine
-from app.bot import build_application, send_summary_if_due
+from app.bot import build_application, register_commands, send_summary_if_due
 from app.database import Database
 from app.discovery import (
     AdapterDiscoveryProvider,
@@ -155,7 +155,17 @@ async def run() -> None:
                         id="daily-summary",
                         replace_existing=True,
                     )
+                scheduler.add_job(
+                    database.backup_if_due,
+                    "interval",
+                    hours=1,
+                    args=[settings.backup_keep],
+                    id="backup",
+                    replace_existing=True,
+                    next_run_time=datetime.now(UTC),
+                )
                 scheduler.start()
+                await register_commands(application.bot)
                 logging.getLogger(__name__).info(
                     "Price Monitor iniciado; intervalo padrão %s min, perto do alvo %s min",
                     schedule.default_minutes, schedule.near_target_minutes,

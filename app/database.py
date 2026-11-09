@@ -765,6 +765,23 @@ class Database:
                 (key, value),
             )
 
+    def backup_if_due(self, keep: int) -> None:
+        """Copy the database once a day, keeping only the most recent `keep` copies."""
+        today = datetime.now().date().isoformat()
+        if keep <= 0 or self.get_state("last_backup") == today:
+            return
+        folder = self.path.parent / "backups"
+        folder.mkdir(parents=True, exist_ok=True)
+        destination = sqlite3.connect(folder / f"{self.path.stem}-{today}.db")
+        try:
+            with self.connection() as source:
+                source.backup(destination)
+        finally:
+            destination.close()
+        self.set_state("last_backup", today)
+        for old in sorted(folder.glob(f"{self.path.stem}-*.db"))[:-keep]:
+            old.unlink()
+
     def store_health(self) -> list[StoreHealth]:
         with self.connection() as connection:
             rows = connection.execute("SELECT * FROM store_health ORDER BY store").fetchall()

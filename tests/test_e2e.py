@@ -255,13 +255,27 @@ async def test_extra_alerts_arrive_once_in_daily_summary(db, send, sent):
     assert "Nenhuma novidade" in sent[0]
 
 
-async def test_summary_due_sends_once_per_day_even_after_its_time(db, send, sent):
+async def test_summary_due_sends_once_a_day_and_only_with_news(db, send, sent):
+    await send_summary_if_due(db, send, 0, 0)
+    assert sent == []
+    _, listing = register(db)
+    db.add_queued_alert(listing.id, "BACK_IN_STOCK", Decimal("10"), Decimal("10"))
+    db.set_state("last_daily_summary", "2000-01-01")
     await send_summary_if_due(db, send, 0, 0)
     await send_summary_if_due(db, send, 0, 0)
     assert len(sent) == 1
-    db.set_state("last_daily_summary", "2000-01-01")
-    await send_summary_if_due(db, send, 0, 0)
-    assert len(sent) == 2
+
+
+def test_backup_runs_once_a_day_and_keeps_recent_copies(db):
+    folder = db.path.parent / "backups"
+    folder.mkdir()
+    for day in range(1, 4):
+        (folder / f"prices-2000-01-0{day}.db").touch()
+    db.backup_if_due(2)
+    db.backup_if_due(2)
+    names = sorted(path.name for path in folder.iterdir())
+    assert len(names) == 2 and names[0] == "prices-2000-01-03.db"
+    assert (folder / names[1]).stat().st_size > 0
 
 
 async def test_opening_a_search_choice_discards_pending_target_edit(db):
