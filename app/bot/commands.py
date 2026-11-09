@@ -13,6 +13,7 @@ from functools import wraps
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
+from ..alerts import STORE_LABELS, shipping_text, store_label
 from ..charts import NoChartData, render_price_chart
 from ..database import MAX_CHECK_INTERVAL, MIN_CHECK_INTERVAL, Database, DatabaseError
 from ..digest import build_daily_summary
@@ -37,6 +38,12 @@ MAX_QUERY_LENGTH = 200
 MAX_HISTORY_DAYS = 3650
 LAST_SUMMARY_KEY = "last_daily_summary"
 LINK = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+def _moment(value: datetime) -> str:
+    local = value.astimezone()
+    today = local.date() == datetime.now().astimezone().date()
+    return local.strftime("%H:%M" if today else "%d/%m %H:%M")
 
 
 def command(handler):
@@ -666,36 +673,40 @@ class Commands:
     async def status(self, update, context) -> None:
         products = self.database.list_products(active_only=True)
         listings = self.database.list_listings(active_only=True, confirmed_only=True)
-        lines = [f"Ativos: {len(products)} produtos, {len(listings)} URLs monitoradas."]
-        health = self.database.store_health()
-        for item in health:
+        lines = [f"📊 {len(products)} produtos · {len(listings)} ofertas monitoradas"]
+        for item in self.database.store_health():
             if item.consecutive_failures:
+                label = STORE_LABELS.get(item.store, item.store)
                 lines.append(
-                    f"⚠️ {item.store}: {item.consecutive_failures} ciclo(s) seguidos com falha — "
-                    f"{item.last_error or 'erro desconhecido'}"
+                    f"⚠️ {label}: sem resposta válida há {item.consecutive_failures} verificações"
                 )
-
-        def timestamp(value):
-            return value.astimezone().strftime("%d/%m %H:%M") if value else "ainda não ocorreu"
-
         for listing in listings:
-            lines.append(
-                f"Listing {listing.id} [{listing.store}]: {short_text(listing.title, 100)}\n"
-                f"Última tentativa: {timestamp(listing.last_checked_at)}\n"
-                f"Último sucesso: {timestamp(listing.last_success_at)}"
-            )
-            if listing.last_error:
-                lines.append(f"Erro: {listing.last_error}.")
-                lines.append("Preço anterior é histórico; a oferta atual não foi confirmada.")
-            else:
-                snapshot = self.database.latest_snapshot(listing.id)
-                if snapshot and snapshot.product_price is not None:
-                    shipping = ("frete desconhecido" if snapshot.shipping_price is None else
-                                f"frete {format_brl(snapshot.shipping_price)}")
-                    lines.append(
-                        f"Última coleta: produto {format_brl(snapshot.product_price)}; {shipping}."
-                    )
+            lines.extend(["", *self._status_lines(listing)])
         await self._reply(update, "\n".join(lines))
+
+    def _status_lines(self, listing) -> list[str]:
+        """A failed check never presents the previous price as the current one."""
+        title = short_text(listing.title, 80)
+        store = store_label(listing)
+        snapshot = self.database.latest_snapshot(listing.id)
+        if listing.last_error:
+            last = "sem preço anterior"
+            if snapshot and snapshot.product_price is not None:
+                last = (f"último preço {format_brl(snapshot.product_price)} "
+                        f"(às {_moment(snapshot.captured_at)})")
+            return [
+                f"⚠️ {title}",
+                f"{store} · {last}",
+                f"Falhou às {_moment(listing.last_checked_at)}: "
+                f"{short_text(listing.last_error, 120)}",
+            ]
+        if snapshot is None:
+            return [f"⏳ {title}", f"{store} · aguardando a primeira verificação"]
+        checked = f"Verificado às {_moment(listing.last_checked_at or snapshot.captured_at)}"
+        if snapshot.product_price is None:
+            return [f"📦 {title}", f"{store} · sem estoque no momento", checked]
+        price = format_brl(snapshot.product_price)
+        return [f"✅ {title}", f"{store} · {price} · {shipping_text(snapshot)}", checked]
 
     @command
     async def set_target(self, update, context) -> None:

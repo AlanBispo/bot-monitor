@@ -269,12 +269,31 @@ async def test_failures_keep_history_warn_once_and_recover(db, send, sent):
                       schedule=ScheduleSettings(store_failure_threshold=2))
     for _ in range(4):
         await monitor.check_once(send)
-    assert len(sent) == 1 and "shop falhou em 2" in sent[0]
+    assert len(sent) == 1 and "shop: sem resposta válida há 2" in sent[0]
     assert len(db.history(listing.id)) == 1
     assert db.product_history_stats(product.id).current_price is None
     shop.error = None
     await monitor.check_once(send)
     assert sent[-1].startswith("✅ shop voltou")
+
+
+async def test_status_separates_current_price_from_failed_check(db, send):
+    _, healthy = register(db, target="1", url=URL + "/a")
+    _, broken = db.register_product_listing(
+        "Outro", Decimal("1"), "amazon", "https://www.amazon.com.br/dp/X", "Outro",
+    )
+    observe(db, healthy.id, "2750.28")
+    observe(db, broken.id, "382.50")
+    db.record_check(healthy.id)
+    db.record_check(broken.id, error="HTTP 503")
+    db.record_store_result("amazon", error="HTTP 503", threshold=6)
+    response = update()
+    await TelegramBot(db, {}, 123).status(response, args())
+    text = response.effective_message.replies[0]
+    assert "⚠️ Amazon: sem resposta válida há 1 verificações" in text
+    assert "✅ Produto X\nshop · R$ 2.750,28 · frete não informado" in text
+    assert "⚠️ Outro\nAmazon · último preço R$ 382,50" in text
+    assert "HTTP 503" in text
 
 
 async def test_unknown_shipping_never_triggers_target_alert(db, send, sent):
@@ -427,7 +446,7 @@ async def test_generic_sites_have_independent_health(db, send, sent):
     monitor = Monitor(db, {"generic": Sites()}, AlertEngine(db),
                       schedule=ScheduleSettings(store_failure_threshold=1))
     await monitor.check_once(send)
-    assert len(sent) == 1 and "ruim.example falhou" in sent[0]
+    assert len(sent) == 1 and "ruim.example: sem resposta" in sent[0]
 
 
 def test_settings_error_names_the_variable(monkeypatch):

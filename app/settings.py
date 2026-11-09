@@ -97,7 +97,7 @@ class Settings:
                 default_minutes=max(5, _read("CHECK_INTERVAL_MINUTES", "30", int)),
                 near_target_minutes=max(5, _read("CHECK_INTERVAL_NEAR_TARGET_MINUTES", "10", int)),
                 near_target_percent=_read("NEAR_TARGET_PERCENT", "10", Decimal),
-                store_failure_threshold=max(1, _read("STORE_FAILURE_ALERT_CYCLES", "3", int)),
+                store_failure_threshold=max(1, _read("STORE_FAILURE_ALERT_CYCLES", "6", int)),
             ),
             alerts=AlertSettings(
                 drop_percent=_read("PRICE_DROP_ALERT_PERCENT", "15", Decimal),

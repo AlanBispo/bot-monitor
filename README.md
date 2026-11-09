@@ -138,7 +138,7 @@ Em `QUIET_HOURS` (22:00-07:00 por padrão) as mensagens automáticas continuam c
 
 ### Aviso de loja com falha
 
-Se todas as consultas de uma loja falharem em `STORE_FAILURE_ALERT_CYCLES` ciclos seguidos (3 por padrão), o bot avisa uma única vez e avisa de novo quando a loja voltar a responder. `/status` mostra as lojas com falha e o último erro.
+Se todas as consultas de uma loja falharem em `STORE_FAILURE_ALERT_CYCLES` ciclos seguidos (6 por padrão), o bot avisa uma única vez e avisa de novo quando a loja voltar a responder. `/status` mostra as lojas com falha e o último erro.
 
 `/buscar` é uma busca ampla de cadastro. A resposta usa identificadores curtos (`R1`, `R2`...) e informa cobertura, falhas parciais, variantes ambíguas e frete desconhecido. Use `/selecionar ID_DA_BUSCA R1 PREÇO_ALVO` ou o botão da resposta para confirmar uma oferta. O bot valida a página novamente antes de registrar. `/anexar ID_DO_PRODUTO URL` associa outra oferta ao mesmo produto.
 

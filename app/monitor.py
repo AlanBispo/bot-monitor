@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from urllib.parse import urlsplit
 
-from .alerts import AlertEngine
+from .alerts import STORE_LABELS, AlertEngine
 from .database import Database
 from .matching import match_product
 from .models import Listing, PriceSnapshot, Product
@@ -29,7 +29,7 @@ class ScheduleSettings:
     near_target_minutes: int = 10
     near_target_percent: Decimal = Decimal("10")
     # Consecutive cycles in which every check of a store failed before warning once.
-    store_failure_threshold: int = 3
+    store_failure_threshold: int = 6
 
 
 class Monitor:
@@ -143,14 +143,17 @@ class Monitor:
             )
             if transition is None:
                 continue
+            label = STORE_LABELS.get(store, store)
             if transition == "failing":
                 message = (
-                    f"⚠️ {store} falhou em {self.schedule.store_failure_threshold} verificações "
-                    f"seguidas: {error}\nOs preços dessa loja não estão sendo atualizados. "
-                    "Aviso de novo quando ela voltar."
+                    f"⚠️ {label}: sem resposta válida há "
+                    f"{self.schedule.store_failure_threshold} verificações seguidas.\n"
+                    f"Motivo: {error}\n"
+                    "Costuma ser bloqueio temporário da loja. Os últimos preços ficam guardados "
+                    "e aviso quando ela voltar."
                 )
             else:
-                message = f"✅ {store} voltou a responder; o monitoramento foi retomado."
+                message = f"✅ {label} voltou a responder; o monitoramento foi retomado."
             try:
                 await send_alert(message)
             except Exception as exc:

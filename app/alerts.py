@@ -303,20 +303,22 @@ def _short_title(name: str) -> str:
     return textwrap.shorten(name, width=MAX_TITLE_LENGTH, placeholder="…")
 
 
-def _store_label(listing: Listing) -> str:
+def store_label(listing: Listing) -> str:
     if listing.store == "generic":
         return (urlsplit(listing.url).hostname or "site").removeprefix("www.")
     return STORE_LABELS.get(listing.store, listing.store)
 
 
-def _delivery_line(listing: Listing, snapshot: PriceSnapshot) -> str:
+def shipping_text(snapshot: PriceSnapshot) -> str:
     if snapshot.shipping_price is None:
-        shipping = "frete não informado"
-    elif snapshot.shipping_price == 0:
-        shipping = "frete grátis"
-    else:
-        shipping = f"frete {format_brl(snapshot.shipping_price)}"
-    return f"{_store_label(listing)} · {shipping}"
+        return "frete não informado"
+    if snapshot.shipping_price == 0:
+        return "frete grátis"
+    return f"frete {format_brl(snapshot.shipping_price)}"
+
+
+def _delivery_line(listing: Listing, snapshot: PriceSnapshot) -> str:
+    return f"{store_label(listing)} · {shipping_text(snapshot)}"
 
 
 def format_drop_alert(
