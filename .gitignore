@@ -11,3 +11,4 @@ data/*.db
 data/*.db-*
 *.log
 *.egg-info/
+data/backups/
