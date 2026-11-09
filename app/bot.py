@@ -24,6 +24,7 @@ from .stores.base import StoreAdapter, StoreError, collect_offer
 
 MAX_QUERY_LENGTH = 200
 MAX_HISTORY_DAYS = 3650
+LAST_SUMMARY_KEY = "last_daily_summary"
 MAX_LIST_BUTTON_PRODUCTS = 25
 MAX_EXTERNAL_TITLE_LENGTH = 300
 TELEGRAM_TEXT_LIMIT = 4096
@@ -96,6 +97,16 @@ async def send_daily_summary(database: Database, send) -> None:
     for chunk in split_telegram_text(text):
         await send(chunk)
     database.mark_alerts_sent([alert.id for alert in alerts])
+
+
+async def send_summary_if_due(database: Database, send, hour: int, minute: int) -> None:
+    """Send today's summary once, as soon as possible after its time, even after downtime."""
+    now = datetime.now()
+    today = now.date().isoformat()
+    if (now.hour, now.minute) < (hour, minute) or database.get_state(LAST_SUMMARY_KEY) == today:
+        return
+    await send_daily_summary(database, send)
+    database.set_state(LAST_SUMMARY_KEY, today)
 
 
 def product_keyboard(products):
@@ -304,6 +315,7 @@ class TelegramBot:
     @command
     async def search(self, update, context) -> None:
         self.pending_selection.pop(update.effective_chat.id, None)
+        self.pending_target.pop(update.effective_chat.id, None)
         query = " ".join(context.args).strip()
         if not query or len(query) > MAX_QUERY_LENGTH:
             await update.effective_message.reply_text(
@@ -527,6 +539,7 @@ class TelegramBot:
         _, session_id, short_id = parts
         await query.answer()
         self.pending_selection.pop(self.allowed_chat_id, None)
+        self.pending_target.pop(self.allowed_chat_id, None)
         try:
             entry = self.database.get_search_entry(
                 session_id, short_id, chat_id=self.allowed_chat_id,

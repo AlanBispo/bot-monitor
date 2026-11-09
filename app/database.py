@@ -184,6 +184,10 @@ class Database:
                     last_success_at TEXT,
                     notified INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS app_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_identity ON listings(identity_key);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_alert
                     ON alerts(listing_id, alert_type) WHERE status = 'pending';
@@ -744,6 +748,21 @@ class Database:
             connection.executemany(
                 "UPDATE alerts SET status = 'sent' WHERE id = ? AND status = 'queued'",
                 [(alert_id,) for alert_id in alert_ids],
+            )
+
+    def get_state(self, key: str) -> str | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT value FROM app_state WHERE key = ?", (key,)
+            ).fetchone()
+        return None if row is None else row["value"]
+
+    def set_state(self, key: str, value: str) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                """INSERT INTO app_state (key, value) VALUES (?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                (key, value),
             )
 
     def store_health(self) -> list[StoreHealth]:

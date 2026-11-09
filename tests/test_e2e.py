@@ -11,11 +11,11 @@ import pytest
 
 import main
 from app.alerts import AlertEngine, AlertSettings
-from app.bot import TelegramBot, send_daily_summary
+from app.bot import TelegramBot, send_daily_summary, send_summary_if_due
 from app.database import Database
 from app.discovery import CandidateURL, DiscoveryOrchestrator, DiscoveryProvider
 from app.identity import explicit_attributes
-from app.models import StoreOffer
+from app.models import SearchEntry, StoreOffer
 from app.monitor import Monitor, ScheduleSettings
 from app.pricing import InvalidMoney, calculate_price, parse_money
 from app.security import UnsafeURL, validate_url
@@ -251,6 +251,29 @@ async def test_extra_alerts_arrive_once_in_daily_summary(db, send, sent):
     sent.clear()
     await send_daily_summary(db, send)
     assert "Nenhuma novidade" in sent[0]
+
+
+async def test_summary_due_sends_once_per_day_even_after_its_time(db, send, sent):
+    await send_summary_if_due(db, send, 0, 0)
+    await send_summary_if_due(db, send, 0, 0)
+    assert len(sent) == 1
+    db.set_state("last_daily_summary", "2000-01-01")
+    await send_summary_if_due(db, send, 0, 0)
+    assert len(sent) == 2
+
+
+async def test_opening_a_search_choice_discards_pending_target_edit(db):
+    product, _ = register(db, target="50")
+    session = db.create_search_session(123, "Produto X", "{}", "complete", {}, [SearchEntry(
+        "", "R1", 1, "shop", URL + "/novo", None, "Produto X", None, Decimal("10"), Decimal("0"),
+        Decimal("10"), None, "matched", "ok", None, "fixture",
+    )])
+    bot = TelegramBot(db, {"shop": Shop()}, 123)
+    await bot.product_button(tap(f"prd:target:{product.id}")[0], None)
+    await bot.selection_button(tap(f"sel:{session.id}:R1")[0], None)
+    assert not bot.pending_target
+    await bot.selection_price(update("42,90"), None)
+    assert db.get_product(product.id).target_price == Decimal("50")
 
 
 async def test_immediate_mode_sends_event_right_away(db, send, sent):

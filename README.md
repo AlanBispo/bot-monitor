@@ -122,7 +122,7 @@ Além do alerta principal (preço-alvo ou queda do produto), produtos com preço
 - **queda percentual:** pelo menos `PRICE_DROP_ALERT_PERCENT`% (15% por padrão) abaixo do maior preço dos últimos 7 dias. Depois de um aviso, só uma nova queda do mesmo tamanho gera outro.
 - **voltou ao estoque:** o anúncio estava indisponível e voltou. Vale também para produtos cadastrados com `/add`.
 
-Com `DAILY_SUMMARY_ENABLED=true` (padrão), esses eventos são agrupados num resumo enviado em `DAILY_SUMMARY_TIME` (09:00). O resumo também traz o preço atual de cada produto, a variação em 24 horas e as lojas com falha. `/resumo` envia o resumo na hora. Com `false`, cada evento é enviado assim que ocorre; se o envio falhar, ele entra no próximo resumo. O alerta de preço-alvo é sempre imediato.
+Com `DAILY_SUMMARY_ENABLED=true` (padrão), esses eventos são agrupados num resumo enviado em `DAILY_SUMMARY_TIME` (09:00). Se o PC estiver desligado nesse horário, o resumo do dia sai poucos minutos depois de o monitor voltar. O resumo também traz o preço atual de cada produto, a variação em 24 horas e as lojas com falha. `/resumo` envia o resumo na hora. Com `false`, cada evento é enviado assim que ocorre; se o envio falhar, ele entra no próximo resumo. O alerta de preço-alvo é sempre imediato.
 
 ### Aviso de loja com falha
 

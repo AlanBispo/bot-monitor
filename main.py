@@ -13,7 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
 from app.alerts import AlertEngine, AlertSettings
-from app.bot import build_application, send_daily_summary
+from app.bot import build_application, send_summary_if_due
 from app.database import Database
 from app.discovery import (
     AdapterDiscoveryProvider,
@@ -164,12 +164,12 @@ async def run() -> None:
                     next_run_time=datetime.now(UTC),
                 )
                 if alert_settings.daily_summary:
+                    # Polling instead of cron: a PC that was off at the set time still catches up.
                     scheduler.add_job(
-                        send_daily_summary,
-                        "cron",
-                        hour=summary_hour,
-                        minute=summary_minute,
-                        args=[database, send],
+                        send_summary_if_due,
+                        "interval",
+                        minutes=MONITOR_TICK_MINUTES,
+                        args=[database, send, summary_hour, summary_minute],
                         id="daily-summary",
                         replace_existing=True,
                     )
@@ -196,6 +196,6 @@ if __name__ == "__main__":
         pass
     except Exception as exc:
         logging.getLogger(__name__).error(
-            "falha ao iniciar ou executar o Price Monitor (%s)", type(exc).__name__
+            "falha ao iniciar ou executar o Price Monitor (%s): %s", type(exc).__name__, exc
         )
         raise SystemExit(1) from None
