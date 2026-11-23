@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import time
 from decimal import Decimal
-from urllib.parse import quote_plus, urljoin, urlsplit
+from urllib.parse import quote_plus, urlencode, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -26,6 +26,17 @@ from .structured import (
 API = "https://api.mercadolibre.com"
 CATALOG_PATH = re.compile(r"/p/(MLB\d+)", re.IGNORECASE)
 TOKEN_EARLY_RENEWAL = 60
+AIR_CONDITIONERS_DOMAIN = "MLB-AIR_CONDITIONERS"
+CATALOG_SEARCH_LIMIT = 20
+
+
+def _cheapest_new_offer(listing: dict | None) -> dict | None:
+    rows = [
+        row for row in (listing or {}).get("results", [])
+        if row.get("price") and row.get("currency_id") == "BRL"
+        and row.get("condition") == "new"
+    ]
+    return min(rows, key=lambda row: parse_money(row["price"]), default=None)
 
 
 def parse_search_results(html: str, base_url: str = "https://lista.mercadolivre.com.br"):
@@ -117,22 +128,36 @@ class MercadoLivreAdapter(HTTPStoreAdapter):
         canonical = f"https://www.mercadolivre.com.br/p/{product_id}"
         # The API answers 404 when an existing catalog product has no offer to show.
         listing = await self._api_get(f"/products/{product_id}/items")
-        rows = [
-            row for row in (listing or {}).get("results", [])
-            if row.get("price") and row.get("currency_id") == "BRL"
-            and row.get("condition") == "new"
-        ]
-        if not rows:
+        best = _cheapest_new_offer(listing)
+        if best is None:
             return StoreOffer(
                 self.name, title, url, None, None, available=False,
                 observation_status="unavailable", canonical_url=canonical,
             )
-        best = min(rows, key=lambda row: parse_money(row["price"]))
         # The API quotes a cost without any destination, so only free shipping is reliable.
         shipping = Decimal("0.00") if (best.get("shipping") or {}).get("free_shipping") else None
         return StoreOffer(
             self.name, title, url, parse_money(best["price"]), shipping, canonical_url=canonical,
         )
+
+    async def catalog_search(self, query: str, accept) -> list[dict]:
+        """Catalog products accepted by the filter that have an offer, across all sellers."""
+        params = urlencode({
+            "status": "active", "site_id": "MLB", "q": query, "limit": CATALOG_SEARCH_LIMIT,
+        })
+        found = []
+        for row in (await self._api_get(f"/products/search?{params}") or {}).get("results", []):
+            if not accept(row):
+                continue
+            best = _cheapest_new_offer(await self._api_get(f"/products/{row['id']}/items"))
+            if best is not None:
+                found.append({
+                    "name": row["name"],
+                    "attributes": row.get("attributes", []),
+                    "price": parse_money(best["price"]),
+                    "url": f"https://www.mercadolivre.com.br/p/{row['id']}",
+                })
+        return found
 
     async def _access_token(self) -> str:
         if self._token and time.monotonic() < self._token_expires_at:
@@ -170,6 +195,7 @@ class MercadoLivreAdapter(HTTPStoreAdapter):
             return None
         if response.status_code == 401:
             self._token = None
-        if response.status_code != 200:
+        # 206 is a normal answer here: the body simply omits some optional fields.
+        if response.status_code not in {200, 206}:
             raise StoreUnavailable(f"A API do Mercado Livre recusou (HTTP {response.status_code}).")
         return response.json()

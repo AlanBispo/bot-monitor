@@ -23,6 +23,8 @@ from .models import (
     SearchEntry,
     SearchSession,
     StoreHealth,
+    Watch,
+    WatchState,
 )
 from .pricing import PricingResult, parse_money
 from .urls import listing_key
@@ -184,6 +186,27 @@ class Database:
                     last_failure_at TEXT,
                     last_success_at TEXT,
                     notified INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS watches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    brand TEXT NOT NULL,
+                    line TEXT NOT NULL,
+                    btu INTEGER NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    last_run_at TEXT,
+                    last_error TEXT,
+                    UNIQUE (brand, line, btu)
+                );
+                CREATE TABLE IF NOT EXISTS watch_states (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    watch_id INTEGER NOT NULL REFERENCES watches(id),
+                    source TEXT NOT NULL,
+                    voltage TEXT NOT NULL,
+                    baseline_price TEXT NOT NULL,
+                    reference_price TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    UNIQUE (watch_id, source, voltage)
                 );
                 CREATE TABLE IF NOT EXISTS app_state (
                     key TEXT PRIMARY KEY,
@@ -789,6 +812,71 @@ class Database:
                 [(alert_id,) for alert_id in alert_ids],
             )
 
+    def add_watch(self, brand: str, line: str, btu: int) -> Watch:
+        with self.connection() as connection:
+            row = connection.execute(
+                """INSERT INTO watches (brand, line, btu) VALUES (?, ?, ?)
+                   ON CONFLICT(brand, line, btu) DO UPDATE SET active = 1
+                   RETURNING *""",
+                (brand, line, btu),
+            ).fetchone()
+        return self._watch(row)
+
+    def list_watches(self) -> list[Watch]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM watches WHERE active = 1 ORDER BY id"
+            ).fetchall()
+        return [self._watch(row) for row in rows]
+
+    def stop_watch(self, watch_id: int) -> bool:
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE watches SET active = 0 WHERE id = ? AND active = 1", (watch_id,),
+            )
+        return cursor.rowcount > 0
+
+    def record_watch_run(self, watch_id: int, error: str | None) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE watches SET last_run_at = ?, last_error = ? WHERE id = ?",
+                (utc_now(), error, watch_id),
+            )
+
+    def watch_states(self, watch_id: int) -> list[WatchState]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM watch_states WHERE watch_id = ? ORDER BY source, voltage",
+                (watch_id,),
+            ).fetchall()
+        return [self._watch_state(row) for row in rows]
+
+    def get_watch_state(self, state_id: int) -> WatchState:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM watch_states WHERE id = ?", (state_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError("oferta do vigia não encontrada")
+        return self._watch_state(row)
+
+    def save_watch_reference(
+        self, watch_id: int, source: str, voltage: str, price: Decimal, title: str, url: str,
+    ) -> WatchState:
+        """Create the baseline on first sight; later calls only move the reference and offer."""
+        with self.connection() as connection:
+            row = connection.execute(
+                """INSERT INTO watch_states
+                   (watch_id, source, voltage, baseline_price, reference_price, title, url)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(watch_id, source, voltage) DO UPDATE SET
+                   reference_price = excluded.reference_price,
+                   title = excluded.title, url = excluded.url
+                   RETURNING *""",
+                (watch_id, source, voltage, str(price), str(price), title, url),
+            ).fetchone()
+        return self._watch_state(row)
+
     def get_state(self, key: str) -> str | None:
         with self.connection() as connection:
             row = connection.execute(
@@ -928,6 +1016,21 @@ class Database:
             row["check_interval_minutes"],
             row["removed_at"] is not None,
             as_datetime(row["snoozed_until"]) if row["snoozed_until"] else None,
+        )
+
+    @staticmethod
+    def _watch(row: sqlite3.Row) -> Watch:
+        return Watch(
+            int(row["id"]), row["brand"], row["line"], int(row["btu"]), bool(row["active"]),
+            as_datetime(row["last_run_at"]) if row["last_run_at"] else None, row["last_error"],
+        )
+
+    @staticmethod
+    def _watch_state(row: sqlite3.Row) -> WatchState:
+        return WatchState(
+            int(row["id"]), int(row["watch_id"]), row["source"], row["voltage"],
+            Decimal(row["baseline_price"]), Decimal(row["reference_price"]),
+            row["title"], row["url"],
         )
 
     @staticmethod

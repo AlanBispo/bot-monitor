@@ -37,16 +37,15 @@ class FakeApplication:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("startup_delay", [0])
 async def test_startup_checks_immediately_after_telegram_is_ready(
-    monkeypatch, tmp_path, startup_delay,
+    monkeypatch, tmp_path,
 ):
     application = FakeApplication()
     checked = asyncio.Event()
     calls = []
 
     async def start_polling(**kwargs):
-        await asyncio.sleep(startup_delay)
+        await asyncio.sleep(0)
         application.updater.running = True
 
     application.updater.start_polling = start_polling

@@ -30,8 +30,10 @@ from app.stores.amazon import AmazonAdapter
 from app.stores.generic import GenericStructuredAdapter
 from app.stores.magalu import MagaluAdapter
 from app.stores.mercadolivre import MercadoLivreAdapter
+from app.watch import WatchRunner
 
 MONITOR_TICK_MINUTES = 5
+WATCH_TICK_MINUTES = 15
 
 
 class SecretRedactionFilter(logging.Filter):
@@ -163,6 +165,15 @@ async def run() -> None:
                         id="daily-summary",
                         replace_existing=True,
                     )
+                scheduler.add_job(
+                    WatchRunner(database, adapters, settings.watch_interval_hours).run_due,
+                    "interval",
+                    minutes=WATCH_TICK_MINUTES,
+                    args=[send],
+                    id="watches",
+                    replace_existing=True,
+                    next_run_time=datetime.now(UTC),
+                )
                 scheduler.add_job(
                     database.backup_if_due,
                     "interval",

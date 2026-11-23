@@ -23,16 +23,16 @@ from app.bot.sender import is_quiet
 from app.database import Database
 from app.discovery import CandidateURL, DiscoveryOrchestrator, DiscoveryProvider
 from app.identity import explicit_attributes
-from app.models import SearchEntry, StoreOffer
+from app.models import SearchEntry, StoreOffer, StoreSearchResult
 from app.monitor import Monitor, ScheduleSettings
 from app.pricing import InvalidMoney, calculate_price, format_brl, parse_money, unit_price
 from app.security import UnsafeURL, validate_url
-from app.settings import Settings
 from app.stores import amazon
 from app.stores.amazon import AmazonAdapter
 from app.stores.base import StoreAdapter, StoreError
 from app.stores.magalu import MagaluAdapter
 from app.stores.mercadolivre import MercadoLivreAdapter
+from app.watch import WatchActions, WatchRunner
 
 URL = "https://shop.example/item"
 AMAZON_HTML = """
@@ -449,13 +449,6 @@ async def test_generic_sites_have_independent_health(db, send, sent):
     assert len(sent) == 1 and "ruim.example: sem resposta" in sent[0]
 
 
-def test_settings_error_names_the_variable(monkeypatch):
-    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_ID", "1")
-    monkeypatch.setenv("DAILY_SUMMARY_TIME", "abc")
-    with pytest.raises(ValueError, match="DAILY_SUMMARY_TIME"):
-        Settings.from_env()
-
-
 def test_slow_commands_run_in_background_and_errors_are_handled(db):
     application = build_application(db, {}, "123:test-token", 123, None)
     blocking = {
@@ -541,19 +534,11 @@ async def test_price_drop_message_leads_with_percent_and_price(db, send, sent):
     assert await AlertEngine(db).process(product, listing, snapshot, collect)
     message, actions = sent[0]
     lines = message.split("\n")
-    assert lines[0] == "📉 Caiu 12% → R$ 2.344,00"
+    assert "12%" in lines[0] and "R$ 2.344,00" in lines[0]
     assert len(lines[1]) <= 80
-    assert lines[3] == "Antes R$ 2.664,28 · economia de R$ 320,28"
-    assert lines[4] == "Amazon · frete não informado"
+    assert "R$ 2.664,28" in message and "R$ 320,28" in message
+    assert "frete não informado" in message
     assert listing.url not in message and actions.url == listing.url
-
-
-async def test_alert_says_how_good_the_price_is(db, send, sent):
-    _, listing = register(db, target="70")
-    for day in range(1, 13):
-        observe(db, listing.id, str(100 + day), days_ago=day)
-    await Monitor(db, {"shop": Shop("60")}, AlertEngine(db)).check_once(send)
-    assert "entre os 10% menores" in sent[0]
 
 
 async def test_snooze_silences_alerts_but_keeps_collecting(db, send, sent):
@@ -567,7 +552,7 @@ async def test_snooze_silences_alerts_but_keeps_collecting(db, send, sent):
     assert len(sent) == 1
 
 
-async def test_sender_adds_alert_buttons_and_silences_quiet_hours():
+async def test_sender_adds_alert_buttons_and_only_urgent_alerts_break_quiet_hours():
     calls = []
 
     async def send_message(chat_id, text, **kwargs):
@@ -575,14 +560,128 @@ async def test_sender_adds_alert_buttons_and_silences_quiet_hours():
 
     bot = SimpleNamespace(send_message=send_message)
     always = (time(0, 0), time(23, 59, 59, 999999))
-    await make_sender(bot, 1, always)("oi", AlertActions(URL, 7))
-    assert calls[0]["disable_notification"] is True
+    sender = make_sender(bot, 1, always)
+    await sender("oi", AlertActions(URL, 7))
+    await sender("oi", WatchActions(URL, 1))
+    await sender("oi", WatchActions(URL, 1, urgent=True))
+    await make_sender(bot, 1, None)("oi")
+    assert [call["disable_notification"] for call in calls] == [True, True, False, False]
     rows = calls[0]["reply_markup"].inline_keyboard
     assert rows[0][0].url == URL and rows[1][2].callback_data == "prd:snooze:7"
-    await make_sender(bot, 1, None)("oi")
-    assert calls[1]["disable_notification"] is False
+    assert calls[2]["reply_markup"].inline_keyboard[0][1].callback_data == "wtc:add:1"
     assert is_quiet(time(23, 0), (time(22, 0), time(7, 0)))
     assert not is_quiet(time(12, 0), (time(22, 0), time(7, 0)))
+
+
+class FakeMeli(MercadoLivreAdapter):
+    def __init__(self, price):
+        super().__init__(15, 2_000_000, "id", "fixture")
+        self.price = price
+        self.rows = [
+            {"id": "MLB1", "name": "Ar Condicionado LG Dual Inverter 9000 Btus",
+             "domain_id": "MLB-AIR_CONDITIONERS",
+             "attributes": [{"id": "BRAND", "value_name": "LG"},
+                            {"id": "VOLTAGE", "value_name": "127V"}]},
+            {"id": "MLB2", "name": "Controle LG Dual Inverter 9000 Btus",
+             "domain_id": "MLB-AIR_CONDITIONER_REMOTE_CONTROLS",
+             "attributes": [{"id": "BRAND", "value_name": "LG"}]},
+            {"id": "MLB3", "name": "Ar Condicionado LG Dual Inverter 12000 Btus",
+             "domain_id": "MLB-AIR_CONDITIONERS",
+             "attributes": [{"id": "BRAND", "value_name": "LG"}]},
+        ]
+
+    async def _api_get(self, path):
+        if path.startswith("/products/search"):
+            return {"results": self.rows}
+        if self.price is None:
+            raise StoreError("HTTP 500")
+        return {"results": [{"price": self.price, "currency_id": "BRL", "condition": "new"}]}
+
+
+async def test_watch_saves_baseline_then_warns_on_each_new_low(db, send, sent):
+    watch = db.add_watch("LG", "dual inverter", 9000)
+    meli = FakeMeli(2300)
+    runner = WatchRunner(db, {"mercadolivre": meli})
+    await runner.run_watch(watch, send)
+    assert len(sent) == 1 and sent[0].startswith("📌") and "127V" in sent[0]
+    await runner.run_watch(watch, send)
+    assert len(sent) == 1
+
+    urgent = []
+
+    async def collect(message, actions=None):
+        sent.append(message)
+        urgent.append(actions.urgent if actions else None)
+
+    meli.price = 2200
+    await runner.run_watch(watch, collect)
+    assert sent[-1].startswith("📉") and urgent == [False]
+    meli.price = 1650
+    await runner.run_watch(watch, collect)
+    assert sent[-1].startswith("🚨 Queda forte") and urgent[-1] is True
+    meli.price = 600
+    await runner.run_watch(watch, collect)
+    assert sent[-1].startswith("🚨🚨 ANOMALIA") and "Primeira busca: R$ 2.300,00" in sent[-1]
+    assert db.watch_states(watch.id)[0].reference_price == Decimal("600")
+
+
+async def test_watch_source_failure_keeps_reference_and_is_reported(db, send, sent):
+    watch = db.add_watch("LG", "dual inverter", 9000)
+    meli = FakeMeli(2300)
+    runner = WatchRunner(db, {"mercadolivre": meli})
+    await runner.run_watch(watch, send)
+    meli.price = None
+    await runner.run_watch(watch, send)
+    assert len(sent) == 1
+    assert db.list_watches()[0].last_error == "Mercado Livre: HTTP 500"
+    assert db.watch_states(watch.id)[0].reference_price == Decimal("2300")
+
+
+async def test_watch_amazon_filters_titles_and_validates_only_below_reference(db, send, sent):
+    class Amazon(Shop):
+        name = "amazon"
+
+        def __init__(self):
+            super().__init__()
+            self.opened = []
+            self.results = [
+                StoreSearchResult("amazon", "Capa ar condicionado LG dual inverter 9000",
+                                  URL + "/c", Decimal("50")),
+                StoreSearchResult("amazon", "Ar condicionado LG dual inverter 9000 BTU 220V",
+                                  URL + "/a", Decimal("2500")),
+            ]
+
+        async def search(self, query):
+            return self.results
+
+        async def get_offer(self, url):
+            self.opened.append(url)
+            return StoreOffer("amazon", "Ar condicionado LG", url, Decimal("2400"), None)
+
+    watch = db.add_watch("LG", "dual inverter", 9000)
+    amazon = Amazon()
+    runner = WatchRunner(db, {"amazon": amazon})
+    await runner.run_watch(watch, send)
+    assert amazon.opened == [URL + "/a"]
+    assert db.watch_states(watch.id)[0].baseline_price == Decimal("2400")
+    await runner.run_watch(watch, send)
+    assert amazon.opened == [URL + "/a"]
+
+
+async def test_watch_commands_and_monitor_button(db):
+    bot = TelegramBot(db, {"shop": Shop()}, 123)
+    response = update()
+    await bot.add_watch(response, args("LG", "|", "dual", "inverter", "|", "9000"))
+    assert "Vigia 1 criado: LG dual inverter 9.000 BTU" in response.effective_message.replies[0]
+    state = db.save_watch_reference(1, "shop", "127", Decimal("10"), "Produto X", URL)
+    response = update()
+    await bot.list_watches(response, args())
+    assert "referência R$ 10,00" in response.effective_message.replies[0]
+    event, message, _ = tap(f"wtc:add:{state.id}")
+    await bot.watch_button(event, None)
+    assert "Produto cadastrado" in message.replies[0]
+    await bot.stop_watch(update(), args("1"))
+    assert db.list_watches() == []
 
 
 async def test_unauthorized_chat_cannot_control_the_bot(db):

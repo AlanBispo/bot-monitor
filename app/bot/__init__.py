@@ -25,6 +25,7 @@ COMMAND_MENU = (
     ("buscar", "Procurar um produto"),
     ("add", "Monitorar um link"),
     ("add_alvo", "Monitorar um link com preço-alvo"),
+    ("vigias", "Buscas automáticas"),
     ("check", "Verificar preços agora"),
     ("resumo", "Enviar o resumo agora"),
     ("status", "Situação das lojas e ofertas"),
@@ -132,6 +133,9 @@ def build_application(
         "resumo": bot.summary,
         "intervalo": bot.set_interval,
         "alvo": bot.set_target,
+        "vigiar": bot.add_watch,
+        "vigias": bot.list_watches,
+        "parar_vigia": bot.stop_watch,
         "reativar": bot.reactivate,
         "cancelar": bot.cancel_selection,
         "status": bot.status,
@@ -142,6 +146,7 @@ def build_application(
         )
     application.add_handler(CallbackQueryHandler(bot.selection_button, pattern=r"^sel:"))
     application.add_handler(CallbackQueryHandler(bot.product_button, pattern=r"^prd:"))
+    application.add_handler(CallbackQueryHandler(bot.watch_button, pattern=r"^wtc:", block=False))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, bot.selection_price, block=False)
     )
