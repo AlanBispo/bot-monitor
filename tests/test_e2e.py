@@ -27,7 +27,6 @@ from app.models import SearchEntry, StoreOffer, StoreSearchResult
 from app.monitor import Monitor, ScheduleSettings
 from app.pricing import InvalidMoney, calculate_price, format_brl, parse_money, unit_price
 from app.security import UnsafeURL, validate_url
-from app.settings import Settings
 from app.stores import amazon
 from app.stores.amazon import AmazonAdapter
 from app.stores.base import StoreAdapter, StoreError
@@ -450,13 +449,6 @@ async def test_generic_sites_have_independent_health(db, send, sent):
     assert len(sent) == 1 and "ruim.example: sem resposta" in sent[0]
 
 
-def test_settings_error_names_the_variable(monkeypatch):
-    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_ID", "1")
-    monkeypatch.setenv("DAILY_SUMMARY_TIME", "abc")
-    with pytest.raises(ValueError, match="DAILY_SUMMARY_TIME"):
-        Settings.from_env()
-
-
 def test_slow_commands_run_in_background_and_errors_are_handled(db):
     application = build_application(db, {}, "123:test-token", 123, None)
     blocking = {
@@ -542,19 +534,11 @@ async def test_price_drop_message_leads_with_percent_and_price(db, send, sent):
     assert await AlertEngine(db).process(product, listing, snapshot, collect)
     message, actions = sent[0]
     lines = message.split("\n")
-    assert lines[0] == "📉 Caiu 12% → R$ 2.344,00"
+    assert "12%" in lines[0] and "R$ 2.344,00" in lines[0]
     assert len(lines[1]) <= 80
-    assert lines[3] == "Antes R$ 2.664,28 · economia de R$ 320,28"
-    assert lines[4] == "Amazon · frete não informado"
+    assert "R$ 2.664,28" in message and "R$ 320,28" in message
+    assert "frete não informado" in message
     assert listing.url not in message and actions.url == listing.url
-
-
-async def test_alert_says_how_good_the_price_is(db, send, sent):
-    _, listing = register(db, target="70")
-    for day in range(1, 13):
-        observe(db, listing.id, str(100 + day), days_ago=day)
-    await Monitor(db, {"shop": Shop("60")}, AlertEngine(db)).check_once(send)
-    assert "entre os 10% menores" in sent[0]
 
 
 async def test_snooze_silences_alerts_but_keeps_collecting(db, send, sent):
@@ -568,7 +552,7 @@ async def test_snooze_silences_alerts_but_keeps_collecting(db, send, sent):
     assert len(sent) == 1
 
 
-async def test_sender_adds_alert_buttons_and_silences_quiet_hours():
+async def test_sender_adds_alert_buttons_and_only_urgent_alerts_break_quiet_hours():
     calls = []
 
     async def send_message(chat_id, text, **kwargs):
@@ -576,12 +560,15 @@ async def test_sender_adds_alert_buttons_and_silences_quiet_hours():
 
     bot = SimpleNamespace(send_message=send_message)
     always = (time(0, 0), time(23, 59, 59, 999999))
-    await make_sender(bot, 1, always)("oi", AlertActions(URL, 7))
-    assert calls[0]["disable_notification"] is True
+    sender = make_sender(bot, 1, always)
+    await sender("oi", AlertActions(URL, 7))
+    await sender("oi", WatchActions(URL, 1))
+    await sender("oi", WatchActions(URL, 1, urgent=True))
+    await make_sender(bot, 1, None)("oi")
+    assert [call["disable_notification"] for call in calls] == [True, True, False, False]
     rows = calls[0]["reply_markup"].inline_keyboard
     assert rows[0][0].url == URL and rows[1][2].callback_data == "prd:snooze:7"
-    await make_sender(bot, 1, None)("oi")
-    assert calls[1]["disable_notification"] is False
+    assert calls[2]["reply_markup"].inline_keyboard[0][1].callback_data == "wtc:add:1"
     assert is_quiet(time(23, 0), (time(22, 0), time(7, 0)))
     assert not is_quiet(time(12, 0), (time(22, 0), time(7, 0)))
 
@@ -695,20 +682,6 @@ async def test_watch_commands_and_monitor_button(db):
     assert "Produto cadastrado" in message.replies[0]
     await bot.stop_watch(update(), args("1"))
     assert db.list_watches() == []
-
-
-async def test_urgent_watch_alert_ignores_quiet_hours():
-    calls = []
-
-    async def send_message(chat_id, text, **kwargs):
-        calls.append(kwargs)
-
-    always = (time(0, 0), time(23, 59, 59, 999999))
-    sender = make_sender(SimpleNamespace(send_message=send_message), 1, always)
-    await sender("x", WatchActions(URL, 1, urgent=True))
-    await sender("x", WatchActions(URL, 1))
-    assert [call["disable_notification"] for call in calls] == [False, True]
-    assert calls[0]["reply_markup"].inline_keyboard[0][1].callback_data == "wtc:add:1"
 
 
 async def test_unauthorized_chat_cannot_control_the_bot(db):

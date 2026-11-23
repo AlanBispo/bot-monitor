@@ -59,7 +59,7 @@ Normative project documentation is located at:
 - `docs/SPEC.md`: functional and technical source of truth;
 - `docs/agents/CODER.md`: stable implementation instructions;
 - `docs/agents/REVIEWER.md`: stable review instructions;
-- `docs/reviews/REVIEW.md`: review report scoped to the revision and changes identified in the report.
+- `AGENTS.md`: entry point for repository instructions.
 
 The code structure may evolve as needed, but it must remain simple and modular.
 
@@ -663,26 +663,10 @@ Relevant security failures must be fixed before the implementation is considered
 
 ## 29. Complete Product Scope
 
-The complete first release must include:
-1. functional and authorized Telegram interaction;
-2. SQLite persistence and bounded search-session storage;
-3. unified multi-source search with transparent partial-result reporting;
-4. a configurable generic web discovery provider with a documented no-paid-service path;
-5. end-to-end offer validation and monitoring for Amazon, Mercado Livre, and Magalu;
-6. conservative generic extraction of standardized product data from additional safe public
-   store pages, with unverified results excluded from guaranteed ranking;
-7. product identity and variant matching, deduplication, and deterministic effective-price
-   ranking;
-8. direct URL registration and attachment of multiple listings to one product;
-9. periodic direct-listing monitoring without repeated broad search;
-10. reliable price, shipping, discount, availability, history, and alert behavior;
-11. installation, configuration, manual startup, and optional automatic-start documentation for
-    Windows/WSL;
-12. automated tests, linting, security checks, and dependency checks;
-13. safe degradation when stores, discovery providers, or Telegram fail.
-
-Implementation may be delivered in reviewed increments, but the project must not be described as
-complete until every item above satisfies the Definition of Done.
+The first release covers authorized Telegram use, validated multi-store discovery and listing
+monitoring, local SQLite history and price alerts. It must satisfy the requirements above,
+including the configurable generic discovery provider with a no-paid-service path. Reviewed
+increments may be delivered before the project meets the Definition of Done.
 
 ## 30. Out of Scope and Non-Goals
 
@@ -710,28 +694,14 @@ The following are explicit non-goals:
 
 ## 31. Definition of Done
 
-An implementation should only be considered complete when:
-- it complies with this specification;
-- it runs locally;
-- relevant tests pass;
-- linting passes;
-- no secrets are committed;
-- no known blocking vulnerability remains;
-- the bot restricts control to the authorized user;
-- one user search produces a unified result from all successfully completed configured sources;
-- source failures and unknown shipping are visible in the result;
-- Amazon, Mercado Livre, and Magalu work end-to-end for discovery or discovered-URL validation,
-  registration, direct monitoring, history, and alerts;
-- every ranked price comes from a freshly validated offer rather than a snippet;
-- materially different product variants are not silently compared as equivalent;
-- query parsing, product matching, deduplication, and ranking are deterministic and covered by
-  repeatable tests;
-- the installed application has no runtime dependency on an AI or model service;
-- history is persisted correctly;
-- periodic monitoring does not perform broad search on every cycle;
-- alerts do not generate improper spam;
-- failure in one store does not unnecessarily bring down others;
-- execution documentation is up to date.
+The product runs locally and meets this specification. The complete suite, lint, static security and
+dependency checks pass. No blocking security issue or regression remains. Real secrets are kept out
+of the repository, fixtures, logs and generated artifacts.
+
+Verify the end-to-end workflow for Amazon, Mercado Livre and Magalu, from discovery or
+discovered-URL validation through registration, periodic monitoring, history and alerts.
+Document installation, configuration, manual and optional automatic startup, backup and
+troubleshooting for the supported Windows and WSL setups.
 
 ## 32. Decision Rule
 
@@ -751,63 +721,21 @@ status. The work must not be split into separate implementation gates or repeate
 
 ### 33.1 Complete Implementation Scope
 
-The single implementation delivery must:
-- reject malformed monetary formats instead of normalizing them into plausible prices;
-- classify explicit, ambiguous, and unknown availability safely so unavailable products cannot
-  create target-price alerts;
-- preserve append-only history and duplicate-alert prevention.
+Verify the discovery flow in §5 with deterministic fake providers and no live store access.
+Cover candidate canonicalization, variant handling, partial failures and selection by button or
+short ID through to registration, a manual check and history. Keep responses within Telegram
+limits and tell users to run a new search when a session expires.
 
-It must also implement and test:
-- the structured deterministic query model;
-- discovery-provider and offer-validator boundaries;
-- bounded parallel fan-out with per-source timeouts;
-- search sessions and short result identifiers;
-- candidate canonicalization, matching, rejection, ambiguity, deduplication, and ranking;
-- partial-result reporting.
+Test each store adapter with fixtures for valid, unavailable, malformed, blocked and changed
+pages. Verify that generic discovery routes candidates to the right adapter and that the
+generic extractor rejects ambiguity in product, offer, currency, full price or availability.
+Document setup, terms and limits for the configurable discovery provider.
 
-Tests for the orchestrator must use deterministic fake providers and must not require live store
-access.
-
-The delivery must complete Amazon, Mercado Livre, and Magalu adapters for direct product
-validation and monitoring. It must implement store-native discovery where reliable and ensure
-generic web discovery can still route a discovered URL to the correct adapter.
-
-Each adapter must have deterministic fixtures for successful, unavailable, malformed, blocked,
-and changed-page cases. One adapter failure must not suppress valid results from the others.
-
-The delivery must implement at least one configurable generic web discovery provider and document
-its setup, limits, and terms-sensitive operational requirements. It must implement the
-conservative generic structured-data extractor for safe public store pages.
-
-The final review must verify that:
-- discovered URLs pass URL and DNS safety checks before access;
-- redirects are revalidated;
-- snippet prices never enter history, ranking, or alerts;
-- generic extraction fails closed when product, offer, currency, availability, or full price is
-  ambiguous;
-- unsupported and unverified results are clearly separated from reliable ranked offers.
-
-The delivery must implement the complete user flow:
-1. submit one `/buscar` command;
-2. receive a combined result list ordered by reliable effective price;
-3. see source coverage, partial failures, unknown shipping, and ambiguous variants;
-4. select a result by short identifier or button;
-5. set or confirm the target price;
-6. register one or more equivalent listings;
-7. force a direct check and query history.
-
-Long responses must remain within Telegram limits, and expired search-session selections must fail
-with a clear instruction to search again.
-
-Before the single delivery is called complete:
-- the scheduler must monitor only confirmed listings;
-- broad rediscovery must be separately configured and lower frequency;
-- concurrency, response size, redirects, retries, and timeouts must be bounded;
-- installation, configuration, operation, automatic startup, backup, and troubleshooting must be
-  documented;
-- the complete test suite, linting, static security analysis, and dependency audit must pass;
-- no real secret may exist in source, fixtures, documentation, logs, or generated artifacts;
-- the Finalizer must leave no known blocking finding after its corrections.
+Review URL and DNS checks for discovered offers and redirects. Check that malformed monetary
+values fail validation, unavailable products cannot trigger target alerts, and prices from
+snippets are excluded from ranking, history and alerts. Verify bounded concurrency, response
+sizes, redirects, retries and timeouts. Broad rediscovery, when enabled, has its own lower-frequency
+schedule. Confirm the Definition of Done before recording the final review.
 
 ### 33.2 Mandatory End-to-End Acceptance Scenario
 
