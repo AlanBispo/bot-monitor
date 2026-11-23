@@ -1,5 +1,19 @@
 # Operação do monitor
 
+## Instalação e operação local
+
+Siga o [README](../README.md) para instalar no Windows. Para obter o ID do chat, envie uma mensagem ao seu bot e consulte o método `getUpdates` da API do Telegram. Use o valor de `message.chat.id` no campo `TELEGRAM_ALLOWED_CHAT_ID` e mantenha o token no `.env` local.
+
+No Linux ou WSL, crie e ative o ambiente com `python3 -m venv .venv` e `source .venv/bin/activate`. Instale com `python -m pip install -r requirements.lock` e `python -m pip install --no-deps -e .`. Copie `.env.example` para `.env` na primeira execução e execute `python main.py` após configurar o Telegram.
+
+Para iniciar em segundo plano ao entrar na conta do Windows, registre a tarefa `PriceMonitorBot` no PowerShell:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-startup.ps1 -StartNow
+```
+
+Consulte a tarefa com `Get-ScheduledTask -TaskName PriceMonitorBot` e veja os logs em `logs/monitor-AAAA-MM-DD.log`. Use `Stop-ScheduledTask -TaskName PriceMonitorBot` para parar a tarefa antes de copiar o banco, cujo caminho padrão é `data/prices.db`. O bot também salva cópias diárias em `data/backups`, com retenção definida por `BACKUP_KEEP_DAYS`.
+
 ## Cadastro e manutenção
 
 1. Execute a aplicação com o ambiente configurado no README e abra a conversa privada do bot. `/start` ou `/help` mostram os comandos disponíveis.
@@ -12,7 +26,7 @@ Para URL direta, `/add URL` salva a referência atual e acompanha novos menores 
 
 Use `/lista` para os ativos e `/lista todos` para localizar também os pausados; os botões da lista pausam, retomam, alteram o alvo, mostram o gráfico e removem. `/pausar ID` interrompe o acompanhamento, `/remover ID` também esconde o produto da lista, `/reativar ID` desfaz os dois e `/alvo ID PREÇO` define o modo de preço-alvo. O histórico permanece preservado e disponível em `/exportar`.
 
-URLs da mesma oferta são deduplicadas, descartando rastreamento e preservando parâmetros de SKU, variante e vendedor. A migração prioriza cadastros ativos e preserva todos os IDs e históricos. Se a mesma oferta já estiver ativa em produtos diferentes, ambos são mantidos e o conflito aparece nos logs e em `/status`; use `/lista todos` e desative o cadastro que não quiser acompanhar. Faça backup antes de atualizar, conforme o README.
+URLs da mesma oferta são deduplicadas, descartando rastreamento e preservando parâmetros de SKU, variante e vendedor. A migração prioriza cadastros ativos e preserva todos os IDs e históricos. Se a mesma oferta já estiver ativa em produtos diferentes, ambos são mantidos e o conflito aparece nos logs e em `/status`; use `/lista todos` e desative o cadastro que não quiser acompanhar. Faça backup antes de atualizar, conforme as instruções acima.
 
 ## Preços, identidade e incerteza
 
@@ -62,3 +76,9 @@ Links do Mercado Livre podem abrir normalmente no navegador autenticado e entreg
 Com `ML_CLIENT_ID` e `ML_CLIENT_SECRET` configurados (app criado em developers.mercadolivre.com.br), links de catálogo (`/p/MLB...`) são lidos pela API oficial. O monitor acompanha a oferta nova mais barata do catálogo, que pode ser de um vendedor diferente do link. A API informa um custo de frete sem destino, então só frete grátis entra no preço efetivo; nos demais casos o frete fica desconhecido e o alerta de preço-alvo não dispara, mas o aviso de queda (`/add`) funciona. Em 09/11/2026, links de anúncio direto responderam 403 na API com esse token e continuam dependendo da página pública. A busca `/buscar` também continua usando a página pública.
 
 Na validação pública de 26/10/2026, a Amazon retornou dez candidatos e uma página de produto forneceu título, disponibilidade e preço; o frete ficou desconhecido. Mercado Livre entregou uma página pedindo login, e Magalu retornou 403. Esses estados são falhas de cobertura, e não resultados vazios válidos. Não foram usados login, checkout, CAPTCHA bypass ou Telegram real nessa validação. Não se afirma compatibilidade completa e permanente das três lojas.
+
+## Buscas recorrentes de ar-condicionado
+
+Use `/vigiar LG | dual inverter | 9000` para buscar por marca, linha e capacidade. O intervalo padrão é de 6 horas (`WATCH_INTERVAL_HOURS`). A primeira busca salva o preço de referência do item por loja e grupo de tensão. As buscas seguintes avisam quando aparece um valor menor.
+
+O vigia consulta a Amazon e, quando `ML_CLIENT_ID` e `ML_CLIENT_SECRET` estão configurados, o catálogo oficial do Mercado Livre. Use `/vigias` para consultar as referências e `/parar_vigia ID` para encerrar uma busca.
