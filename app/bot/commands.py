@@ -158,7 +158,7 @@ class Commands:
             "/buscar NOME — procurar produtos\n"
             "/selecionar BUSCA RESULTADO ALVO — confirmar resultado\n"
             "/confirmar BUSCA RESULTADO ALVO — confirmar resultado ambíguo\n"
-            "/add URL — salvar preço atual e avisar novos menores preços do produto\n"
+            "/add URL — avisar cada aumento ou queda no preço do produto\n"
             "/add_alvo PREÇO_ALVO URL — avisar quando atingir o preço efetivo desejado\n"
             "/anexar ID_PRODUTO URL — adicionar outra oferta\n"
             "/alvo ID PREÇO — alterar o alvo\n"
@@ -267,13 +267,13 @@ class Commands:
         mode = (
             f"Alvo: {format_brl(target)} (preço efetivo com frete conhecido)."
             if target is not None else
-            "Avisarei a cada novo menor preço do produto desde o cadastro."
+            "Avisarei a cada aumento ou queda no preço do produto."
         )
         shipping = (
             (
                 "Frete desconhecido; o alerta de preço-alvo aguarda um total confiável."
                 if target is not None else
-                "Frete desconhecido; os avisos de queda comparam apenas o preço do produto."
+                "Frete desconhecido. Os avisos comparam o preço do produto."
             ) if pricing.shipping_price is None else f"Frete: {format_brl(pricing.shipping_price)}."
         )
         await update.effective_message.reply_text(
@@ -490,7 +490,7 @@ class Commands:
         lines = []
         for product in products:
             mode = (
-                "avisar novos menores preços do produto" if product.monitoring_mode == "price_drop"
+                "avisar aumentos e quedas de preço" if product.monitoring_mode == "price_drop"
                 else f"alvo {format_brl(product.target_price)}"
             )
             interval = (f"; checagem a cada {product.check_interval_minutes} min"

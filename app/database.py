@@ -142,7 +142,8 @@ class Database:
                     price TEXT NOT NULL,
                     target_price TEXT NOT NULL,
                     sent_at TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'sent'
+                    status TEXT NOT NULL DEFAULT 'sent',
+                    snapshot_id INTEGER REFERENCES price_history(id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_history_listing_time
                     ON price_history(listing_id, captured_at);
@@ -213,11 +214,20 @@ class Database:
                     value TEXT NOT NULL
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_identity ON listings(identity_key);
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_alert
-                    ON alerts(listing_id, alert_type) WHERE status = 'pending';
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_non_variation_alert
+                    ON alerts(listing_id, alert_type)
+                    WHERE status = 'pending' AND alert_type <> 'PRICE_CHANGE';
+                DROP INDEX IF EXISTS idx_pending_alert;
                 """
             )
             self._ensure_column(connection, "products", "snoozed_until", "TEXT")
+            self._ensure_column(
+                connection, "alerts", "snapshot_id", "INTEGER REFERENCES price_history(id)",
+            )
+            connection.execute(
+                """UPDATE alerts SET alert_type = 'PRICE_CHANGE'
+                   WHERE status = 'pending' AND alert_type = 'PRICE_DROP'"""
+            )
 
     @staticmethod
     def _ensure_column(connection, table: str, column: str, definition: str) -> None:
@@ -368,6 +378,11 @@ class Database:
                 "UPDATE products SET snoozed_until = ?, updated_at = ? WHERE id = ?",
                 (until.isoformat(timespec="microseconds"), utc_now(), product_id),
             )
+            connection.execute(
+                """DELETE FROM alerts WHERE status = 'pending' AND alert_type = 'PRICE_CHANGE'
+                   AND listing_id IN (SELECT id FROM listings WHERE product_id = ?)""",
+                (product_id,),
+            )
         return until
 
     def set_check_interval(self, product_id: int, minutes: int | None) -> Product:
@@ -503,12 +518,12 @@ class Database:
     ) -> PriceSnapshot:
         captured_at = utc_now()
         with self.connection() as connection:
-            cursor = connection.execute(
+            row = connection.execute(
                 """INSERT INTO price_history
                    (listing_id, product_price, shipping_price, confirmed_discount,
                     possible_discount, effective_price, possible_effective_price,
                     available, seller, captured_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *""",
                 (
                     listing_id,
                     self._decimal(product_price),
@@ -521,13 +536,42 @@ class Database:
                     seller,
                     captured_at,
                 ),
-            )
-            snapshot_id = int(cursor.lastrowid)
-        with self.connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM price_history WHERE id = ?", (snapshot_id,)
             ).fetchone()
-        return self._snapshot(row)
+            snapshot = self._snapshot(row)
+            if available and product_price is not None and product_price > 0:
+                self._queue_price_change(connection, snapshot, product_price)
+        return snapshot
+
+    @staticmethod
+    def _queue_price_change(
+        connection: sqlite3.Connection, snapshot: PriceSnapshot, price: Decimal,
+    ) -> None:
+        row = connection.execute(
+            """SELECT h.product_price
+               FROM price_history h
+               JOIN listings l ON l.id = h.listing_id
+               JOIN products p ON p.id = l.product_id
+               WHERE h.listing_id = ? AND h.id < ? AND h.available = 1
+                 AND h.product_price IS NOT NULL AND l.active = 1
+                 AND l.validation_status = 'confirmed' AND p.active = 1
+                 AND p.monitoring_mode = 'price_drop'
+                 AND (p.snoozed_until IS NULL OR p.snoozed_until <= ?)
+               ORDER BY h.id DESC LIMIT 1""",
+            (
+                snapshot.listing_id, snapshot.id,
+                snapshot.captured_at.isoformat(timespec="microseconds"),
+            ),
+        ).fetchone()
+        if row is None:
+            return
+        reference = Decimal(row["product_price"])
+        if reference > 0 and reference != price:
+            connection.execute(
+                """INSERT INTO alerts
+                   (listing_id, alert_type, price, target_price, sent_at, status, snapshot_id)
+                   VALUES (?, 'PRICE_CHANGE', ?, ?, '', 'pending', ?)""",
+                (snapshot.listing_id, str(price), str(reference), snapshot.id),
+            )
 
     def create_search_session(
         self,
@@ -967,7 +1011,8 @@ class Database:
             cursor = connection.execute(
                 """INSERT INTO alerts (listing_id, alert_type, price, target_price, sent_at, status)
                    VALUES (?, ?, ?, ?, '', 'pending')
-                   ON CONFLICT(listing_id, alert_type) WHERE status = 'pending'
+                   ON CONFLICT(listing_id, alert_type)
+                   WHERE status = 'pending' AND alert_type <> 'PRICE_CHANGE'
                    DO UPDATE SET price = excluded.price, target_price = excluded.target_price
                    RETURNING *""",
                 (listing_id, alert_type, str(price), str(target_price)),
@@ -984,6 +1029,22 @@ class Database:
             ).fetchone()
         return None if row is None else self._alert(row)
 
+    def next_price_change(self, listing_id: int) -> tuple[Alert, PriceSnapshot | None] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM alerts WHERE listing_id = ? AND alert_type = 'PRICE_CHANGE'
+                   AND status = 'pending' ORDER BY id LIMIT 1""",
+                (listing_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            snapshot = None
+            if row["snapshot_id"] is not None:
+                snapshot = connection.execute(
+                    "SELECT * FROM price_history WHERE id = ?", (row["snapshot_id"],),
+                ).fetchone()
+        return self._alert(row), self._snapshot(snapshot) if snapshot else None
+
     def mark_alert_sent(self, alert_id: int) -> None:
         with self.connection() as connection:
             connection.execute(
@@ -991,10 +1052,12 @@ class Database:
                 (utc_now(), alert_id),
             )
 
-    def cancel_pending_alert(self, listing_id: int) -> None:
+    def cancel_pending_target_alert(self, listing_id: int) -> None:
         with self.connection() as connection:
             connection.execute(
-                "DELETE FROM alerts WHERE listing_id = ? AND status = 'pending'", (listing_id,),
+                """DELETE FROM alerts WHERE listing_id = ? AND status = 'pending'
+                   AND alert_type = 'TARGET_REACHED'""",
+                (listing_id,),
             )
 
     @staticmethod

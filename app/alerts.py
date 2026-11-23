@@ -72,19 +72,16 @@ class AlertEngine:
         return bool(product.snoozed_until and product.snoozed_until > datetime.now(UTC))
 
     async def process_best_offer(self, product: Product, observed, send) -> int:
-        """Run the main alert only for the cheapest offer among the ones just observed."""
+        """Run the target alert only for the cheapest reliable offer."""
         offers = self.database.current_offers(product.id)
-        if product.monitoring_mode == "target":
-            offers = [offer for offer in offers if offer[1].effective_price is not None]
-            best = min(offers, key=lambda offer: offer[1].effective_price, default=None)
-        else:
-            best = min(offers, key=lambda offer: offer[1].product_price, default=None)
+        offers = [offer for offer in offers if offer[1].effective_price is not None]
+        best = min(offers, key=lambda offer: offer[1].effective_price, default=None)
         count = 0
         for listing, snapshot, _ in observed:
             if self._snoozed(product) or best is None or listing.id != best[0].id:
-                self.database.cancel_pending_alert(listing.id)
+                self.database.cancel_pending_target_alert(listing.id)
             else:
-                count += int(await self.process(product, listing, snapshot, send))
+                count += int(await self._process_target(product, listing, snapshot, send))
         return count
 
     async def process_product_events(self, product: Product, observed, send) -> int:
@@ -187,7 +184,7 @@ class AlertEngine:
             if last_price:
                 detail = f"último preço antes de esgotar: {format_brl(last_price)}"
             events.append((BACK_IN_STOCK, last_price or price, detail))
-        # Price-drop products already alert on every new low, and only the cheapest offer counts.
+        # Variation alerts already cover drops for products without a target.
         if product.monitoring_mode != "target" or not is_cheapest:
             return events
         now = datetime.now(UTC)
@@ -223,22 +220,23 @@ class AlertEngine:
                     ))
         return events
 
-    async def process(
+    async def _process_target(
         self,
         product: Product,
         listing: Listing,
         snapshot: PriceSnapshot,
-        send: Callable[[str], Awaitable[None]],
+        send: Callable[[str, AlertActions], Awaitable[None]],
     ) -> bool:
         async with self._lock:
-            if product.monitoring_mode == "price_drop":
-                return await self._process_drop(product, listing, snapshot, send)
+            if self._snoozed(product):
+                self.database.cancel_pending_target_alert(listing.id)
+                return False
             if not target_reached(snapshot, product.target_price):
-                self.database.cancel_pending_alert(listing.id)
+                self.database.cancel_pending_target_alert(listing.id)
                 return False
             pending = self.database.pending_alert(listing.id, "TARGET_REACHED")
             if pending and pending.target_price != product.target_price:
-                self.database.cancel_pending_alert(listing.id)
+                self.database.cancel_pending_target_alert(listing.id)
                 pending = None
             previous = self.database.last_product_alert(product.id, "TARGET_REACHED")
             if pending is None and previous and previous.target_price == product.target_price and (
@@ -269,34 +267,30 @@ class AlertEngine:
         LOGGER.info("alerta %s enviado para listing %s", alert.alert_type, alert.listing_id)
         return True
 
-    async def _process_drop(self, product, listing, snapshot, send) -> bool:
-        if not snapshot.available or snapshot.product_price is None or snapshot.product_price <= 0:
-            self.database.cancel_pending_alert(listing.id)
-            return False
-        # Each listing has its own captured baseline, including attached store offers.
-        history = self.database.history(listing.id)
-        baseline = next(
-            (row.product_price for row in history if row.available
-             and row.product_price is not None and row.product_price > 0), None,
-        )
-        if baseline is None:
-            return False
-        previous = self.database.last_product_alert(product.id, "PRICE_DROP")
-        reference = min(baseline, previous.price) if previous else baseline
-        if snapshot.product_price >= reference:
-            self.database.cancel_pending_alert(listing.id)
-            return False
-        alert = self.database.add_alert(
-            listing.id, "PRICE_DROP", snapshot.product_price, reference,
-        )
-        return await self._deliver(
-            alert,
-            format_drop_alert(
-                product, listing, snapshot, reference, self._notes(product, listing, snapshot),
-            ),
-            send,
-            listing,
-        )
+    async def process_next_price_change(
+        self,
+        listing_id: int,
+        latest: PriceSnapshot,
+        send: Callable[[str, AlertActions], Awaitable[None]],
+    ) -> bool:
+        async with self._lock:
+            pending = self.database.next_price_change(listing_id)
+            if pending is None:
+                return False
+            listing = self.database.get_listing(listing_id)
+            product = self.database.get_product(listing.product_id)
+            if (not listing.active or not product.active or product.monitoring_mode != "price_drop"
+                    or self._snoozed(product)):
+                return False
+            alert, original = pending
+            if original is None and alert.price == latest.product_price:
+                original = latest  # Pending alerts created before snapshots were linked.
+            if original is not None and original.id == latest.id:
+                notes = self._notes(product, listing, original)
+            else:
+                notes = ["Preço registrado em uma checagem anterior."]
+            message = format_price_change_alert(product, listing, alert, original, notes)
+            return await self._deliver(alert, message, send, listing)
 
 
 def _short_title(name: str) -> str:
@@ -321,19 +315,24 @@ def _delivery_line(listing: Listing, snapshot: PriceSnapshot) -> str:
     return f"{store_label(listing)} · {shipping_text(snapshot)}"
 
 
-def format_drop_alert(
-    product: Product, listing: Listing, snapshot: PriceSnapshot, reference: Decimal,
+def format_price_change_alert(
+    product: Product, listing: Listing, alert: Alert, snapshot: PriceSnapshot | None,
     notes: list[str],
 ) -> str:
-    saved = reference - snapshot.product_price
-    percent = saved / reference * 100
-    shown = f"{percent:.0f}" if percent >= 1 else f"{percent:.1f}".replace(".", ",")
+    reference = alert.target_price
+    change = alert.price - reference
+    direction, detail = ("📈 Subiu", "aumento") if change > 0 else ("📉 Caiu", "economia")
+    percent = abs(change) / reference * 100
+    if percent < Decimal("0.1"):
+        shown = "menos de 0,1"
+    else:
+        shown = f"{percent:.0f}" if percent >= 1 else f"{percent:.1f}".replace(".", ",")
     lines = [
-        f"📉 Caiu {shown}% → {format_brl(snapshot.product_price)}",
+        f"{direction} {shown}% → {format_brl(alert.price)}",
         _short_title(product.name),
         "",
-        f"Antes {format_brl(reference)} · economia de {format_brl(saved)}",
-        _delivery_line(listing, snapshot),
+        f"Antes {format_brl(reference)} · {detail} de {format_brl(abs(change))}",
+        _delivery_line(listing, snapshot) if snapshot is not None else store_label(listing),
         *notes,
     ]
     return "\n".join(lines)

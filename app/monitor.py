@@ -105,18 +105,39 @@ class Monitor:
             if isinstance(result, dict) and result["observed"]:
                 observed.setdefault(result["observed"][0].product_id, []).append(result["observed"])
         totals = {"alerts": 0, "delivery_failed": 0}
+
+        async def record_delivery(product_id, delivery):
+            try:
+                delivered = await delivery
+            except Exception as exc:
+                LOGGER.warning(
+                    "falha de entrega no produto %s: %s", product_id, type(exc).__name__,
+                )
+                totals["delivery_failed"] += 1
+                return 0
+            totals["alerts"] += delivered
+            return delivered
+
         for product_id, items in observed.items():
             product = self.database.get_product(product_id)
-            for step in (
-                self.alert_engine.process_product_events, self.alert_engine.process_best_offer,
-            ):
-                try:
-                    totals["alerts"] += await step(product, items, send_alert)
-                except Exception as exc:
-                    LOGGER.warning(
-                        "falha de entrega no produto %s: %s", product_id, type(exc).__name__,
-                    )
-                    totals["delivery_failed"] += 1
+            if not product.active:
+                continue
+            await record_delivery(
+                product_id, self.alert_engine.process_product_events(product, items, send_alert),
+            )
+            if product.monitoring_mode == "target":
+                await record_delivery(
+                    product_id, self.alert_engine.process_best_offer(product, items, send_alert),
+                )
+            else:
+                for listing, snapshot, _ in items:
+                    while await record_delivery(
+                        product_id,
+                        self.alert_engine.process_next_price_change(
+                            listing.id, snapshot, send_alert,
+                        ),
+                    ):
+                        pass
         return totals
 
     @staticmethod
@@ -173,7 +194,7 @@ class Monitor:
                 raise
             product = self.database.get_product(listing.product_id)
             if not product.active or not self.database.get_listing(listing.id).active:
-                self.database.cancel_pending_alert(listing.id)
+                self.database.cancel_pending_target_alert(listing.id)
                 return result
             if offer.store != listing.store:
                 raise StoreError("loja da oferta divergente")
@@ -186,7 +207,7 @@ class Monitor:
                 self.database.add_snapshot(
                     listing.id, None, None, None, None, None, None, False, offer.seller
                 )
-                self.database.cancel_pending_alert(listing.id)
+                self.database.cancel_pending_target_alert(listing.id)
                 self.database.record_check(listing.id)
                 result["checked"] = 1
                 return result

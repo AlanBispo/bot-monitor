@@ -48,7 +48,7 @@ class Product:
     updated_at: datetime
     identity_json: str | None = None
     source_query: str | None = None
-    # The legacy target_price column stores the captured reference in price_drop mode.
+    # The persisted "price_drop" mode tracks all item price changes.
     monitoring_mode: Literal["target", "price_drop"] = "target"
     # None means automatic: shorter interval near the target, default interval otherwise.
     check_interval_minutes: int | None = None

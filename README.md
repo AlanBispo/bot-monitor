@@ -4,7 +4,7 @@ Um bot de Telegram que acompanha preços em lojas como Amazon, Mercado Livre e M
 
 ## O que dá para fazer
 
-- **Acompanhar um produto.** Cole o link para receber avisos de novas quedas ou use `/add_alvo 29,90 LINK` para definir quanto quer pagar. Dá para acompanhar anúncios de várias lojas para o mesmo produto.
+- **Acompanhar um produto.** Cole o link para receber avisos de aumentos e quedas no preço do produto ou use `/add_alvo 29,90 LINK` para definir quanto quer pagar. Dá para acompanhar anúncios de várias lojas para o mesmo produto.
 - **Encontrar ofertas.** Use `/buscar sabão líquido OMO 3L` para comparar resultados e escolher qual anúncio acompanhar. Para ar-condicionado, `/vigiar LG | dual inverter | 9000` repete a busca por marca, linha e capacidade e avisa quando encontra um novo menor preço na Amazon ou no catálogo do Mercado Livre.
 - **Entender a variação de preço.** Consulte o histórico com gráfico no Telegram ou exporte os dados em CSV.
 

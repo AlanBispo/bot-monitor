@@ -516,13 +516,12 @@ async def test_product_alerts_only_cheapest_store_and_reports_new_leader(db, sen
     assert [alert.alert_type for alert in db.queued_alerts()] == ["CHEAPER_STORE"]
 
 
-async def test_price_drop_message_leads_with_percent_and_price(db, send, sent):
+async def test_price_drop_message_leads_with_percent_and_price(db, sent):
     title = "Ar Condicionado Split Midea Inverter AI 12000 BTU/h Frio 42EFVCA12M8 - 127 Volts"
     _, listing = db.register_product_listing(
         title, Decimal("100"), "amazon", "https://www.amazon.com.br/dp/X", title,
         monitoring_mode="price_drop",
     )
-    product = db.get_product(listing.product_id)
     observe(db, listing.id, "2664.28")
 
     async def collect(message, actions):
@@ -531,7 +530,7 @@ async def test_price_drop_message_leads_with_percent_and_price(db, send, sent):
     snapshot = db.add_snapshot(
         listing.id, Decimal("2344.00"), None, None, None, None, None, True, None,
     )
-    assert await AlertEngine(db).process(product, listing, snapshot, collect)
+    assert await AlertEngine(db).process_next_price_change(listing.id, snapshot, collect)
     message, actions = sent[0]
     lines = message.split("\n")
     assert "12%" in lines[0] and "R$ 2.344,00" in lines[0]
@@ -539,6 +538,167 @@ async def test_price_drop_message_leads_with_percent_and_price(db, send, sent):
     assert "R$ 2.664,28" in message and "R$ 320,28" in message
     assert "frete não informado" in message
     assert listing.url not in message and actions.url == listing.url
+
+
+async def test_price_changes_compare_each_listing_to_its_own_last_price(db, send, sent):
+    product, first = db.register_product_listing(
+        "Produto X", Decimal("100"), "shop", URL + "/a", "Produto X",
+        monitoring_mode="price_drop",
+    )
+    second = db.add_listing(product.id, "shop", URL + "/b", "Produto X")
+    shop = TwoStores({first.url: "100", second.url: "120"})
+    monitor = Monitor(db, {"shop": shop}, AlertEngine(db))
+    assert await monitor.check_once(send) == 0
+
+    shop.prices[second.url] = "120.01"
+    assert await monitor.check_once(send) == 1
+    assert "Subiu menos de 0,1%" in sent[-1]
+    assert all(value in sent[-1] for value in ("R$ 120,00", "R$ 120,01", second.url))
+
+    shop.prices[second.url] = "120"
+    assert await monitor.check_once(send) == 1
+    assert "Caiu" in sent[-1] and second.url in sent[-1]
+    assert await monitor.check_once(send) == 0
+    assert len(sent) == 2
+
+
+async def test_price_change_retries_failed_delivery_after_restart(db, send, sent):
+    db.register_product_listing(
+        "Produto X", Decimal("100"), "shop", URL, "Produto X",
+        monitoring_mode="price_drop",
+    )
+    shop = Shop(shipping=None)
+    monitor = Monitor(db, {"shop": shop}, AlertEngine(db))
+    assert await monitor.check_once(send) == 0
+
+    shop.error = StoreError("falha temporária")
+    assert await monitor.check_once(send) == 0
+    shop.error = None
+    shop.price = Decimal("105")
+
+    async def fail(*_):
+        raise RuntimeError("Telegram indisponível")
+
+    assert await monitor.check_once(fail) == 0
+    assert monitor.last_run["delivery_failed"] == 1
+
+    database = Database(db.path)
+    database.initialize()
+    monitor = Monitor(database, {"shop": shop}, AlertEngine(database))
+    assert await monitor.check_once(send) == 1
+    assert "Subiu 5%" in sent[0] and "Antes R$ 100,00" in sent[0]
+    assert await monitor.check_once(send) == 0
+
+
+async def test_price_change_write_failure_rolls_back_snapshot(db, send, sent):
+    _, listing = db.register_product_listing(
+        "Produto X", Decimal("100"), "shop", URL, "Produto X",
+        monitoring_mode="price_drop",
+    )
+    shop = Shop()
+    monitor = Monitor(db, {"shop": shop}, AlertEngine(db))
+    assert await monitor.check_once(send) == 0
+    with db.connection() as connection:
+        connection.execute(
+            """CREATE TRIGGER fail_price_change BEFORE INSERT ON alerts
+               WHEN NEW.alert_type = 'PRICE_CHANGE'
+               BEGIN SELECT RAISE(ABORT, 'falha simulada'); END"""
+        )
+
+    shop.price = Decimal("90")
+    assert await monitor.check_once(send) == 0
+    assert monitor.last_run["failed"] == 1
+    assert [row.product_price for row in db.history(listing.id)] == [Decimal("100")]
+    assert db.next_price_change(listing.id) is None
+    with db.connection() as connection:
+        connection.execute("DROP TRIGGER fail_price_change")
+
+    database = Database(db.path)
+    database.initialize()
+    monitor = Monitor(database, {"shop": shop}, AlertEngine(database))
+    assert await monitor.check_once(send) == 1
+    assert "Caiu 10%" in sent[0] and "R$ 90,00" in sent[0]
+    assert await monitor.check_once(send) == 0
+
+
+async def test_pending_price_change_survives_unavailability_and_a_new_price(db, send, sent):
+    db.register_product_listing(
+        "Produto X", Decimal("100"), "shop", URL, "Produto X",
+        monitoring_mode="price_drop",
+    )
+    shop = Shop()
+    monitor = Monitor(db, {"shop": shop}, AlertEngine(db))
+    assert await monitor.check_once(send) == 0
+
+    async def fail(*_):
+        raise RuntimeError("Telegram indisponível")
+
+    shop.price = Decimal("110")
+    assert await monitor.check_once(fail) == 0
+    shop.available = False
+    assert await monitor.check_once(send) == 0
+    assert sent == []
+
+    shop.available = True
+    shop.price = Decimal("105")
+    assert await monitor.check_once(send) == 2
+    assert all(text in sent[0] for text in ("Subiu 10%", "R$ 110,00", "checagem anterior"))
+    assert all(text in sent[1] for text in ("Caiu", "R$ 105,00", "Antes R$ 110,00"))
+    assert await monitor.check_once(send) == 0
+
+
+@pytest.mark.parametrize("action", ["pause", "snooze", "confirm_remove", "target"])
+async def test_price_change_rechecks_product_between_deliveries(db, send, sent, action):
+    product, first = db.register_product_listing(
+        "Produto X", Decimal("100"), "shop", URL + "/a", "Produto X",
+        monitoring_mode="price_drop",
+    )
+    second = db.add_listing(product.id, "shop", URL + "/b", "Produto X")
+    shop = TwoStores({first.url: "100", second.url: "120"})
+    monitor = Monitor(db, {"shop": shop}, AlertEngine(db))
+    assert await monitor.check_once(send) == 0
+    bot = TelegramBot(db, {}, 123)
+
+    async def deliver(message, actions):
+        await send(message, actions)
+        if action == "target":
+            await bot.set_target(update(), args(str(product.id), "99"))
+        else:
+            await bot.product_button(tap(f"prd:{action}:{product.id}")[0], None)
+
+    shop.prices.update({first.url: "101", second.url: "121"})
+    assert await monitor.check_once(deliver) == 1
+    assert len(sent) == 1 and first.url in sent[0]
+    assert db.next_price_change(second.id) is None
+
+
+async def test_legacy_pending_price_drop_is_delivered_after_upgrade(db, send, sent):
+    _, listing = db.register_product_listing(
+        "Produto X", Decimal("100"), "shop", URL, "Produto X",
+        monitoring_mode="price_drop",
+    )
+    observe(db, listing.id, "90")
+    sent_legacy = db.add_alert(listing.id, "PRICE_DROP", Decimal("95"), Decimal("100"))
+    db.mark_alert_sent(sent_legacy.id)
+    legacy = db.add_alert(listing.id, "PRICE_DROP", Decimal("90"), Decimal("100"))
+    # Restore the alerts schema from before the upgrade.
+    with db.connection() as connection:
+        connection.execute("ALTER TABLE alerts DROP COLUMN snapshot_id")
+        connection.execute("DROP INDEX idx_pending_non_variation_alert")
+        connection.execute(
+            """CREATE UNIQUE INDEX idx_pending_alert ON alerts(listing_id, alert_type)
+               WHERE status = 'pending'"""
+        )
+
+    database = Database(db.path)
+    database.initialize()
+    database.initialize()
+    monitor = Monitor(database, {"shop": Shop(price="90")}, AlertEngine(database))
+    assert await monitor.check_once(send) == 1
+    assert "Caiu 10%" in sent[0] and "R$ 90,00" in sent[0]
+    assert await monitor.check_once(send) == 0
+    assert database.last_alert(listing.id, "PRICE_CHANGE").id == legacy.id
+    assert database.last_alert(listing.id, "PRICE_DROP").id == sent_legacy.id
 
 
 async def test_snooze_silences_alerts_but_keeps_collecting(db, send, sent):

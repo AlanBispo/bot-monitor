@@ -22,7 +22,9 @@ Consulte a tarefa com `Get-ScheduledTask -TaskName PriceMonitorBot` e veja os lo
 4. O comando equivalente é `/selecionar BUSCA R1 ALVO`. Para adicionar a um produto existente, use `/selecionar BUSCA R1 ALVO ID_PRODUTO`; o alvo já existente continua sendo o do produto. Use `/alvo ID PREÇO` para alterá-lo explicitamente.
 5. `/confirmar BUSCA R1 ALVO` confirma uma oferta ambígua conscientemente. Conflitos explícitos continuam bloqueados. A confirmação vale para a identidade da oferta escolhida; não autoriza futuras trocas de variante.
 
-Para URL direta, `/add URL` salva a referência atual e acompanha novos menores preços do produto, conforme o modo de queda disponível no projeto. `/add_alvo PREÇO URL` acompanha o preço efetivo com frete conhecido; o formato antigo `/add PREÇO URL` continua funcionando. `/anexar ID URL` inclui outra oferta equivalente no mesmo produto.
+Para URL direta, `/add URL` salva o preço atual e avisa a cada aumento ou queda em relação ao último preço válido de cada anúncio. `/add_alvo PREÇO URL` acompanha o preço efetivo com frete conhecido. O formato `/add PREÇO URL` também define um alvo. `/anexar ID URL` inclui outra oferta equivalente no mesmo produto.
+
+Se o envio de um aviso de variação falhar, o bot tenta enviar os avisos pendentes do anúncio em ordem na próxima checagem que confirmar a disponibilidade. A mensagem identifica preços registrados em checagens anteriores.
 
 Use `/lista` para os ativos e `/lista todos` para localizar também os pausados; os botões da lista pausam, retomam, alteram o alvo, mostram o gráfico e removem. `/pausar ID` interrompe o acompanhamento, `/remover ID` também esconde o produto da lista, `/reativar ID` desfaz os dois e `/alvo ID PREÇO` define o modo de preço-alvo. O histórico permanece preservado e disponível em `/exportar`.
 
@@ -30,7 +32,7 @@ O bot evita cadastrar a mesma oferta duas vezes. Ao comparar URLs, descarta par�
 
 ## Preços, identidade e incerteza
 
-Ofertas com frete desconhecido mostram o preço do produto e a ausência de total calculável. Elas não ocupam o menor total garantido nem disparam alertas de preço-alvo. No modo de queda do produto, o aviso informa explicitamente que compara o preço do item, sem frete e sem cupons condicionais.
+Ofertas com frete desconhecido mostram o preço do produto e a ausência de total calculável. Elas não ocupam o menor total garantido nem disparam alertas de preço-alvo. Os alertas de variação comparam o preço do item, sem frete e sem cupons condicionais.
 
 Condições de clube, compra mínima, preço por período/unidade e entrega indisponível não são promovidas a total garantido. Condições estruturadas do item são confrontadas com o título; um conflito entre novo e recondicionado impede classificação confiável. Pacotes com quantidade não solicitada e variantes não especificadas ficam ambíguos.
 
@@ -73,7 +75,7 @@ O endpoint precisa ser público e resolver somente para IPs públicos; localhost
 
 Se uma loja exigir login, bloquear a consulta ou mudar o formato da página, o bot informa a falha e preserva o histórico. Uma busca pode trazer resultados parciais quando alguma das fontes falhar.
 
-Com `ML_CLIENT_ID` e `ML_CLIENT_SECRET` no `.env`, o monitor consulta links de catálogo do Mercado Livre (`/p/MLB...`) pela API oficial. Ele acompanha a menor oferta de produto novo retornada para o catálogo, que pode vir de outro vendedor. Como a consulta é feita sem destino de entrega, só o frete grátis confirmado entra no cálculo do total. Quando o frete fica desconhecido, o acompanhamento de queda do preço do item continua disponível via `/add`. Anúncios diretos e a busca `/buscar` dependem das páginas públicas da loja.
+Com `ML_CLIENT_ID` e `ML_CLIENT_SECRET` no `.env`, o monitor consulta links de catálogo do Mercado Livre (`/p/MLB...`) pela API oficial. Ele acompanha a menor oferta de produto novo retornada para o catálogo, que pode vir de outro vendedor. Como a consulta é feita sem destino de entrega, só o frete grátis confirmado entra no cálculo do total. Quando o frete fica desconhecido, o acompanhamento de variações no preço do item continua disponível via `/add`. Anúncios diretos e a busca `/buscar` dependem das páginas públicas da loja.
 
 ## Buscas recorrentes de ar-condicionado
 
