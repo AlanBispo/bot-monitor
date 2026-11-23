@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
 
 from ..security import is_authorized_chat
 from .formatting import DATABASE_FAILURE_MESSAGE, product_identifier, short_text
@@ -44,7 +45,35 @@ def alert_keyboard(url: str, product_id: int):
     ])
 
 
+def watch_keyboard(url: str, state_id: int):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🛒 Abrir", url=url),
+        InlineKeyboardButton("📈 Monitorar", callback_data=f"wtc:add:{state_id}"),
+    ]])
+
+
 class Buttons:
+    async def watch_button(self, update, context) -> None:
+        query = update.callback_query
+        if not self._authorized_callback(query):
+            if query:
+                await query.answer("Acesso não autorizado.", show_alert=True)
+            return
+        await query.answer()
+        try:
+            state = self.database.get_watch_state(product_identifier(query.data.split(":")[2]))
+        except (KeyError, ValueError, IndexError):
+            await query.message.reply_text("Oferta não encontrada.")
+            return
+        chat = SimpleNamespace(id=self.allowed_chat_id, type="private")
+        await self._add(
+            SimpleNamespace(effective_chat=chat, effective_message=query.message),
+            SimpleNamespace(args=[state.url]),
+            require_target=False,
+        )
+
     def _authorized_callback(self, query) -> bool:
         message = query.message if query else None
         return (

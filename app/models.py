@@ -103,6 +103,31 @@ class Alert:
 
 
 @dataclass(frozen=True)
+class Watch:
+    id: int
+    brand: str
+    line: str
+    btu: int
+    active: bool
+    last_run_at: datetime | None
+    last_error: str | None
+
+
+@dataclass(frozen=True)
+class WatchState:
+    """Lowest price already reported for one source and voltage of a saved search."""
+
+    id: int
+    watch_id: int
+    source: str
+    voltage: str
+    baseline_price: Decimal
+    reference_price: Decimal
+    title: str
+    url: str
+
+
+@dataclass(frozen=True)
 class StoreHealth:
     store: str
     consecutive_failures: int

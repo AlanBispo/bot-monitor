@@ -24,6 +24,7 @@ from ..query import parse_query
 from ..security import UnsafeURL, validate_url
 from ..stores.base import StoreAdapter, StoreError, collect_offer
 from ..urls import host_matches
+from ..watch import VOLTAGE_LABELS, describe_watch
 from .buttons import MAX_LIST_BUTTON_PRODUCTS, product_keyboard
 from .formatting import (
     DATABASE_FAILURE_MESSAGE,
@@ -171,6 +172,9 @@ class Commands:
             "/intervalo ID MINUTOS|auto — frequência de checagem do produto\n"
             "/pausar ID — pausar o monitoramento\n"
             "/remover ID — remover da lista (histórico preservado)\n"
+            "/vigiar MARCA | LINHA | BTU — procurar ofertas sozinho\n"
+            "/vigias — listar vigias\n"
+            "/parar_vigia ID — encerrar vigia\n"
             "/status — mostrar status\n/help — esta ajuda"
         )
 
@@ -707,6 +711,52 @@ class Commands:
             return [f"📦 {title}", f"{store} · sem estoque no momento", checked]
         price = format_brl(snapshot.product_price)
         return [f"✅ {title}", f"{store} · {price} · {shipping_text(snapshot)}", checked]
+
+    @command
+    async def add_watch(self, update, context) -> None:
+        parts = [part.strip() for part in " ".join(context.args).split("|")]
+        if len(parts) != 3 or not all(parts) or not parts[2].isdigit():
+            raise ValueError(
+                "Uso: /vigiar MARCA | LINHA | BTU\nEx.: /vigiar LG | dual inverter | 9000"
+            )
+        watch = self.database.add_watch(parts[0], parts[1], int(parts[2]))
+        await update.effective_message.reply_text(
+            f"Vigia {watch.id} criado: {describe_watch(watch)}.\n"
+            "A primeira busca salva o preço de referência."
+        )
+
+    @command
+    async def list_watches(self, update, context) -> None:
+        watches = self.database.list_watches()
+        if not watches:
+            await update.effective_message.reply_text("Nenhum vigia ativo. Use /vigiar.")
+            return
+        lines = []
+        for watch in watches:
+            lines.append(f"{watch.id}. {describe_watch(watch)}")
+            for state in self.database.watch_states(watch.id):
+                lines.append(
+                    f"   {STORE_LABELS.get(state.source, state.source)} · "
+                    f"{VOLTAGE_LABELS[state.voltage]}: referência "
+                    f"{format_brl(state.reference_price)} "
+                    f"(primeira busca {format_brl(state.baseline_price)})"
+                )
+            if watch.last_run_at is None:
+                lines.append("   aguardando a primeira busca")
+            else:
+                lines.append(f"   última busca: {_moment(watch.last_run_at)}")
+            if watch.last_error:
+                lines.append(f"   ⚠️ {watch.last_error}")
+        await self._reply(update, "\n".join(lines))
+
+    @command
+    async def stop_watch(self, update, context) -> None:
+        if len(context.args) != 1:
+            raise ValueError("Uso: /parar_vigia ID")
+        changed = self.database.stop_watch(product_identifier(context.args[0]))
+        await update.effective_message.reply_text(
+            "Vigia encerrado." if changed else "Vigia não encontrado."
+        )
 
     @command
     async def set_target(self, update, context) -> None:
