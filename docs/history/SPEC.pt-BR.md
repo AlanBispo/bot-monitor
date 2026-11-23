@@ -1,7 +1,6 @@
-# SPEC.md
-ESSA SPEC É APENAS PARA DOCUMENTAR EM PORTUGUÊS E NÃO DEVE SER UTILIZADA
+# Price Monitor Bot — Especificação histórica em português
 
-# Price Monitor Bot — Especificação Funcional e Técnica
+Esta versão registra o escopo original do projeto. Os requisitos vigentes estão na [especificação atual](../SPEC.md).
 
 ## 1. Objetivo
 

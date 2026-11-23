@@ -2,9 +2,9 @@
 
 ## Instalação e operação local
 
-Siga o [README](../README.md) para instalar no Windows. Para obter o ID do chat, envie uma mensagem ao seu bot e consulte o método `getUpdates` da API do Telegram. Use o valor de `message.chat.id` no campo `TELEGRAM_ALLOWED_CHAT_ID` e mantenha o token no `.env` local.
+Siga o [README](../README.md) para instalar no Windows. Antes de iniciar o monitor, envie uma mensagem privada ao seu bot e consulte o método `getUpdates`. Use o valor de `message.chat.id` no campo `TELEGRAM_ALLOWED_CHAT_ID`. Guarde o token no `.env` local. [Documentação da API do Telegram](https://core.telegram.org/bots/api#getupdates)
 
-No Linux ou WSL, crie e ative o ambiente com `python3 -m venv .venv` e `source .venv/bin/activate`. Instale com `python -m pip install -r requirements.lock` e `python -m pip install --no-deps -e .`. Copie `.env.example` para `.env` na primeira execução e execute `python main.py` após configurar o Telegram.
+No Linux ou WSL, use Python 3.12 para criar e ativar o ambiente com `python3.12 -m venv .venv` e `source .venv/bin/activate`. Instale com `python -m pip install -r requirements.lock` e `python -m pip install --no-deps -e .`. Copie `.env.example` para `.env` na primeira execução e execute `python main.py` após configurar o Telegram.
 
 Para iniciar em segundo plano ao entrar na conta do Windows, registre a tarefa `PriceMonitorBot` no PowerShell:
 
@@ -26,7 +26,7 @@ Para URL direta, `/add URL` salva a referência atual e acompanha novos menores 
 
 Use `/lista` para os ativos e `/lista todos` para localizar também os pausados; os botões da lista pausam, retomam, alteram o alvo, mostram o gráfico e removem. `/pausar ID` interrompe o acompanhamento, `/remover ID` também esconde o produto da lista, `/reativar ID` desfaz os dois e `/alvo ID PREÇO` define o modo de preço-alvo. O histórico permanece preservado e disponível em `/exportar`.
 
-URLs da mesma oferta são deduplicadas, descartando rastreamento e preservando parâmetros de SKU, variante e vendedor. A migração prioriza cadastros ativos e preserva todos os IDs e históricos. Se a mesma oferta já estiver ativa em produtos diferentes, ambos são mantidos e o conflito aparece nos logs e em `/status`; use `/lista todos` e desative o cadastro que não quiser acompanhar. Faça backup antes de atualizar, conforme as instruções acima.
+O bot evita cadastrar a mesma oferta duas vezes. Ao comparar URLs, descarta parâmetros de rastreamento e preserva parâmetros de SKU, variante e vendedor.
 
 ## Preços, identidade e incerteza
 
@@ -38,7 +38,7 @@ O monitor usa os atributos da oferta confirmada, além da busca original. Se uma
 
 ## Diagnóstico e recuperação
 
-`/check` informa coletas válidas, falhas, frete desconhecido, alertas enviados e falhas de envio. `/status` mostra as lojas com falhas seguidas, além da última tentativa, do último sucesso e do erro de cada oferta. Uma loja em que todas as consultas falharam por `STORE_FAILURE_ALERT_CYCLES` ciclos gera um único aviso, e outro quando ela volta. Uma falha de correspondência do produto não conta como falha da loja. Sites genéricos são acompanhados por domínio. Um preço anterior não é tratado como atual quando a consulta mais recente falhou.
+`/check` informa coletas válidas, falhas, frete desconhecido, alertas enviados e falhas de envio. `/status` mostra as lojas com falhas consecutivas e a situação de cada oferta. Se uma consulta falhar, o bot mostra o erro e indica quando o último preço foi coletado, se houver. Quando todas as consultas de uma loja falham por `STORE_FAILURE_ALERT_CYCLES` ciclos, o bot avisa uma vez e volta a avisar quando a loja responde.
 
 Alertas de preço têm estado pendente distinto de enviado. Uma falha no Telegram ou cancelamento mantém o evento para o próximo ciclo, inclusive após reiniciar. A repetição exige uma observação nova que ainda satisfaça a condição. Oferta indisponível, frete desconhecido no modo alvo, desativação ou preço fora do alvo cancelam pendências incompatíveis.
 
@@ -69,13 +69,11 @@ search:
 
 O endpoint precisa ser público e resolver somente para IPs públicos; localhost, rede privada e metadados continuam bloqueados. Esta entrega não instala nem hospeda uma instância. SearXNG é opcional: com endpoint vazio, a aplicação usa somente as fontes nativas, sem dependência de serviço pago. `GENERIC_DISCOVERY_FORMAT=json` mantém compatibilidade com endpoints customizados de formato `{"results":[{"url":"https://loja.example/produto"}]}`.
 
-## Limitações verificadas e piloto
+## Limitações das lojas
 
-Links do Mercado Livre podem abrir normalmente no navegador autenticado e entregar ao monitor uma tela de login com HTTP 200. O cadastro informa explicitamente quando a loja exige acesso à conta; nenhum preço ou produto é inventado ou cadastrado a partir dessa tela. Na validação do link de catálogo `/p/MLB67821329`, com o anúncio `MLB4679319035`, remover os parâmetros do carrinho não eliminou a exigência de login. Esta versão não usa cookies da conta nem autenticação de navegador.
+Se uma loja exigir login, bloquear a consulta ou mudar o formato da página, o bot informa a falha e preserva o histórico. Uma busca pode trazer resultados parciais quando alguma das fontes falhar.
 
-Com `ML_CLIENT_ID` e `ML_CLIENT_SECRET` configurados (app criado em developers.mercadolivre.com.br), links de catálogo (`/p/MLB...`) são lidos pela API oficial. O monitor acompanha a oferta nova mais barata do catálogo, que pode ser de um vendedor diferente do link. A API informa um custo de frete sem destino, então só frete grátis entra no preço efetivo; nos demais casos o frete fica desconhecido e o alerta de preço-alvo não dispara, mas o aviso de queda (`/add`) funciona. Em 09/11/2026, links de anúncio direto responderam 403 na API com esse token e continuam dependendo da página pública. A busca `/buscar` também continua usando a página pública.
-
-Na validação pública de 26/10/2026, a Amazon retornou dez candidatos e uma página de produto forneceu título, disponibilidade e preço; o frete ficou desconhecido. Mercado Livre entregou uma página pedindo login, e Magalu retornou 403. Esses estados são falhas de cobertura, e não resultados vazios válidos. Não foram usados login, checkout, CAPTCHA bypass ou Telegram real nessa validação. Não se afirma compatibilidade completa e permanente das três lojas.
+Com `ML_CLIENT_ID` e `ML_CLIENT_SECRET` no `.env`, o monitor consulta links de catálogo do Mercado Livre (`/p/MLB...`) pela API oficial. Ele acompanha a menor oferta de produto novo retornada para o catálogo, que pode vir de outro vendedor. Como a consulta é feita sem destino de entrega, só o frete grátis confirmado entra no cálculo do total. Quando o frete fica desconhecido, o acompanhamento de queda do preço do item continua disponível via `/add`. Anúncios diretos e a busca `/buscar` dependem das páginas públicas da loja.
 
 ## Buscas recorrentes de ar-condicionado
 
